@@ -64,6 +64,7 @@ dsh plugin --profile desktop add github:jaychang1989/dsh-webchat
 | 中栏提示「载入失败：…」 | 宿主拒绝了访客（桥接返回异常）。文本里带着宿主给的原因 |
 | 点了入口却弹出一个浏览器窗口 | 说明当前渲染进程拿不到 `dshDesktop.browser`（例如在纯 web 环境），插件走了降级路径 |
 | 重启后要求重新登录 | 见上面的「已知限制」，属于宿主分区机制 |
+| 页面弹出「使用环境异常」 | DeepSeek 前端会检查 `navigator.userAgent` 里是否含 `electron`（桌面端默认 UA 就含），命中就提示"建议使用官方产品"。0.5.2 起访客改用普通 Chrome UA，不再触发 |
 
 ## 开发与测试
 

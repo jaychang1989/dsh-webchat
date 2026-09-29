@@ -82,6 +82,10 @@ function element(tagName, document) {
       this.loadedUrls.push(url)
       return Promise.resolve()
     },
+    /** Electron's <webview> user-agent override. */
+    setUserAgent(userAgent) {
+      this.userAgents = (this.userAgents ?? []).concat(userAgent)
+    },
     closest(selector) {
       let node = this
       while (node !== null && node !== undefined) {
@@ -223,7 +227,11 @@ function loadBundle(document, options = {}) {
   const sandbox = {
     window: { __ModuleLoader__: { load: (row) => rows.push(row) } },
     document,
-    navigator: { language: 'zh-CN' },
+    navigator: {
+      language: 'zh-CN',
+      // The desktop renderer's own user agent, Electron tokens and all.
+      userAgent: 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) dsh/0.2.0-rc.1 Chrome/131.0.6778.86 Electron/33.2.1 Safari/537.36',
+    },
     console: { warn() {}, log() {}, error() {} },
     fetch: options.fetchImpl ?? (async () => ({ ok: true, status: 200, json: async () => ({ ok: true, via: 'app-window' }) })),
     MutationObserver: class {
@@ -304,6 +312,30 @@ test('opening the panel reserves a guest and attaches an approved webview', asyn
   // The page is navigated once the guest reports its document ready.
   frame.dispatch('dom-ready', {})
   await settle()
+  assert.deepEqual(frame.loadedUrls, [PAGE_URL])
+})
+
+test('the guest is given a Chrome user agent, not the Electron one', async () => {
+  const document = makeDocument()
+  const { entry, webview } = mount(document)
+
+  await entry.dispatch('click', { target: null })
+  await settle()
+  const frame = webview()
+
+  // chat.deepseek.com shows its "abnormal usage environment" dialog for any
+  // user agent containing "electron", so neither the attribute nor the
+  // post-attach override may carry one.
+  const expected = 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/131.0.0.0 Safari/537.36'
+  assert.equal(frame.getAttribute('useragent'), expected)
+
+  frame.dispatch('dom-ready', {})
+  await settle()
+  assert.deepEqual(frame.userAgents, [expected])
+  for (const value of [frame.getAttribute('useragent'), ...frame.userAgents]) {
+    assert.doesNotMatch(value, /electron/i)
+  }
+  // The override must land before the page is requested, or it would be moot.
   assert.deepEqual(frame.loadedUrls, [PAGE_URL])
 })
 

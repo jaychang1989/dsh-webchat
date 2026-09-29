@@ -64,6 +64,7 @@ Click again to collapse the panel. The guest stays mounted while the panel is cl
 | The center column says "载入失败：…" | The host refused the guest (the bridge threw). The text carries the host's reason |
 | Clicking the entry opened a browser window instead | This renderer had no `dshDesktop.browser` (a plain web profile, for instance), so the fallback ran |
 | It asks for a login again after a restart | See the limitations above — it is the host's partition behaviour |
+| The page shows "Abnormal usage environment" | DeepSeek's front end checks `navigator.userAgent` for the string `electron` — which the desktop default carries — and then recommends its official product. Since 0.5.2 the guest presents a plain Chrome user agent and the dialog no longer appears |
 
 ## Development and tests
 
