@@ -1,14 +1,14 @@
 {
   "name": "@jaychang1989/dsh-webchat",
-  "version": "0.3.0",
-  "description": "Codex-ChatGPT-mode style web chat for DeepSeek Harness: chat through chat.deepseek.com with your DeepSeek web session instead of API billing, then transfer the conversation into a harness session as development context — or let the harness agent chat through the same web session. Maintained fork retargeted at dsh 0.2.x.",
+  "version": "0.4.0",
+  "description": "Opens the official DeepSeek web app (chat.deepseek.com) in a window from inside DeepSeek Harness: one sidebar entry, one button, no reimplementation — the official page keeps its model picker, deep think, smart search, history and attachments. Fork of xmuwenxiang/dsh-web-chat, reduced to a launcher.",
   "keywords": [
     "dsh",
     "deepseek-harness",
     "deepseek",
     "webchat",
-    "chatgpt-mode",
     "deepseek-web",
+    "launcher",
     "harness-plugin",
     "plugin"
   ],
@@ -34,17 +34,13 @@
     "dsh": ">=0.2.0-rc.1"
   },
   "main": "lib/index.js",
-  "types": "lib/types/index.d.ts",
   "exports": {
     ".": {
-      "types": "./lib/types/index.d.ts",
       "default": "./lib/index.js"
     },
     "./client": {
-      "types": "./lib/types/client/index.d.ts",
       "default": "./lib/client.js"
     },
-    "./src/*": "./src/*",
     "./package.json": "./package.json"
   },
   "dsh": {
@@ -55,36 +51,8 @@
       "platform": "web"
     }
   },
-  "dependencies": {
-    "playwright-core": "^1.63.0"
-  },
-  "peerDependencies": {
-    "@deepseek-ai/dsh-llm": ">=0.2.0-rc.1",
-    "@deepseek-ai/dsh-session": ">=0.2.0-rc.1",
-    "@deepseek-ai/dsh-tools": ">=0.2.0-rc.1",
-    "react": "^18.2.0",
-    "react-dom": "^18.2.0"
-  },
-  "devDependencies": {
-    "@deepseek-ai/cordis": "^4.0.2",
-    "@deepseek-ai/dsh-host-webserver": "^0.2.0-rc.1",
-    "@deepseek-ai/dsh-llm": "^0.2.0-rc.1",
-    "@deepseek-ai/dsh-session": "^0.2.0-rc.1",
-    "@deepseek-ai/dsh-system-prompt": "^0.2.0-rc.1",
-    "@deepseek-ai/dsh-tools": "^0.2.0-rc.1",
-    "@deepseek-ai/dsh-workspace": "^0.2.0-rc.1",
-    "@types/node": "^22.20.0",
-    "@types/react": "~18.3.1",
-    "@types/react-dom": "^18.3.5",
-    "schemastery": "^3.18.0",
-    "typescript": "~5.7.2"
-  },
   "files": [
     "lib/**/*.js",
-    "lib/**/*.js.map",
-    "lib/**/*.d.ts",
-    "lib/**/*.d.ts.map",
-    "src",
     "cordis.patch.yml",
     "NOTICE",
     "README.md",

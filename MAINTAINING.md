@@ -1,146 +1,136 @@
 # Maintaining this fork
 
-## Why the fork exists
+## What this package is now
 
-`xmuwenxiang/dsh-web-chat@0.2.0` is written against dsh **0.1.0-rc.7**. On dsh
-**0.2.0-rc.1** its host half does not even import, so the profile reports:
+A launcher. `0.3.x` drove chat.deepseek.com with Playwright and re-rendered the
+conversation in a custom React panel; `0.4.0` deletes all of that and opens the
+official page in a window instead. Nothing but the launcher survived.
+
+Two hard constraints forced the shape, and both are measurements, not choices:
+
+- `chat.deepseek.com` answers with `Content-Security-Policy: frame-ancestors 'none'`
+  — no iframe can host it;
+- the DSH desktop build runs its windows with `webviewTag: false` and blocks
+  `will-attach-webview` — no `<webview>` either.
+
+The desktop shell does own a `WebContentsView`, but it is reserved for platform
+pages (`--dsh-platform-origin=<account.origin>`, navigation restricted to that
+origin), so it is not a route to an arbitrary URL.
+
+## Layout and build policy
+
+There is **no build step**. `lib/index.js` and `lib/client.js` are the
+hand-written runtime and the source of truth; there is no `src/`, no bundler
+and no toolchain. The package therefore has **zero runtime dependencies**.
 
 ```
-dsh: warning: 1 entry did not activate
-webchat (dsh-webchat): failed to import
+lib/index.js        host half  — two routes + the window strategies
+lib/client.js       browser half — sidebar entry + panel, plain DOM
+cordis.patch.yml    the profile row
+test/*.test.mjs     node --test
 ```
 
-The underlying failure is a link error, not an activation error — `dsh-app-boot`
-only reports `error: "failed to import"` for a fiber that never got created, so
-the real cause never reaches the GUI:
+`package.json` pins the two halves: `exports["."]` → `lib/index.js`,
+`exports["./client"]` → `lib/client.js`, `dsh.bundle.patch` → `cordis.patch.yml`,
+`dsh.client.platform` → `web`.
 
+## The host half
+
+`inject: ['webServer']`; `apply(ctx)` registers exactly two exact routes:
+
+| route | method | answer |
+| --- | --- | --- |
+| `/api/dsh-webchat/state` | GET | `{ ok, url, appWindowOpen, last }` |
+| `/api/dsh-webchat/open` | POST | `{ ok, via, error, at }`, 502 when nothing opened |
+
+`openPage(strategies)` walks `OPEN_STRATEGIES` and records the winner. The list
+is a parameter so the tests can drive it without spawning anything. Strategies:
+
+1. `app-window` — `await import('electron')` then `new BrowserWindow(...)`. The
+   import is **dynamic and inside the call** on purpose: a host with no Electron
+   must still load the plugin, and a failed probe has to fall through to the next
+   strategy rather than kill the entry at import time.
+2. `app-window-shell` — `msedge.exe`/`chrome.exe` with `--app=` and a private
+   `--user-data-dir` under `~/.dsh/dsh-webchat/app-window`.
+3. `system-browser` — `cmd /c start`, `open`, or `xdg-open`.
+
+The window handle lives on `globalThis[Symbol.for('@jaychang1989/dsh-webchat.window')]`
+rather than in module state, so a live profile reload still finds the open
+window instead of stacking a second one.
+
+Deliberate: the plugin does **not** close the window on dispose. A settings
+change re-applies the entry, and closing the user's conversation for that would
+be worse than leaving an orphan window.
+
+## The browser half
+
+The bundle is a module-loader factory — no React, no imports:
+
+```js
+window.__ModuleLoader__.load({
+  id: '<package name>',
+  factory: () => { /* … */ return module.exports },  // { apply, inject }
+})
 ```
-SyntaxError: The requested module '@deepseek-ai/dsh-settings'
-does not provide an export named 'installSettingsSection'
-```
 
-## The two API migrations
+**The `id` must equal the package name verbatim**, scoped names included:
+`dsh-client-modules` keys every browser row by the manifest name and materializes
+that id, so a mismatch means the panel silently never loads. `cordis.patch.yml`'s
+row `name` has to match too. Those three are the only places the package name is
+encoded; the `/api/dsh-webchat` paths, the `dsh-webchat` locale label and the
+`data-dsh-webchat-*` attributes are the plugin's own identity and do not follow
+it.
 
-### 1. Settings forms — `src/index.ts`, `lib/index.js`
+The shell exposes no slot an external plugin can register into, so both surfaces
+are injected at the DOM level and self-heal against React re-renders:
 
-dsh ≥ 0.1.7 owns settings forms: one per profile entry, namespace = the entry id
-(`webchat`), schema = the entry module's exported `Config`, and a form write
-re-applies the entry because the profile runs `patchReload: live`. The
-plugin-side helpers were removed — `@deepseek-ai/dsh-settings` (0.2.0) exports
-only `SettingsConflictError`, `SettingsForms` and `redactSecrets`.
+- **Sidebar entry** — a `<button data-dsh-webchat-entry>` placed after the New
+  Session row inside the sidebar root (`[data-pane="sidebar"], [class*="sidebarCol"]`),
+  with a body-level `MutationObserver` to notice a rebuilt pane and a root-level
+  one to re-insert the row when React displaces it.
+- **Panel view** — a `<div data-dsh-webchat-view>` appended to
+  `[data-pane="conversation"], [class*="centerCol"]`, shown by an
+  `<html data-dsh-webchat-active>` attribute. The injected stylesheet also hides
+  the column's other children while it is active, and opening the panel evicts
+  sibling takeover panels (`data-dsh-taskboard-active`, `data-dsh-ssh-active`)
+  plus the shared `dsh-panel-activate` event.
 
-So the fork **deletes** the `@deepseek-ai/dsh-settings` import, spells
-`WEBCHAT_SETTINGS_NAMESPACE = 'dsh-webchat'` as a literal (it is now only the
-plugin's own label — the browser half had always hard-coded the same string for
-its locale namespace), and **deletes the `installSettingsSection(...)` call**.
-The Loader-provided `config` is the single source of truth, and the single
-`sync()` at the end of `apply` registers every surface.
+The stylesheet is injected as one `<style id="dsh-webchat-style">` built from the
+`CSS` array in `lib/client.js`; it rides the shell's `--dsw-*` tokens so the
+panel follows the active theme.
 
-### 2. Session persistence — `src/transfer.ts`, `lib/index.js`
-
-dsh 0.2.x addresses session storage through **one handle per session**. The
-service-level `load(id)` / `append(id, events)` pair is gone:
-
-| retired | current |
-| --- | --- |
-| `persistence.load(id)` | `persistence.open(id, 'read' \| 'write')` → `SessionHandle` |
-| `persistence.append(id, events)` | `handle.append(events)` on the handle |
-| — | `handle.read(offset, length)` → `{ events }` |
-| — | `handle.flush()` — durability barrier, materializes the artifact |
-| — | `handle.close()` — releases the write lease, drains first |
-
-`transferToHarnessSession` therefore opens a handle, reads the stored log
-through it to learn the next contiguous `seq` / turn number, appends
-`turn/start` + `step/start` + the user message, flushes, and closes in a
-`finally`. The cold-create path uses `create(header)` → `handle.append` →
-`handle.flush` → `handle.close` so the GUI lists the session and can resume it.
-`flush` / `close` are called defensively (`typeof … === 'function'`) because the
-seam declares them as optional for non-JSONL backends.
-
-A session the GUI already holds refuses a second writer, so `open(id, 'write')`
-failures are re-thrown as an actionable Chinese error instead of an opaque one.
-
-## Shipped-build policy (known gap)
-
-`lib/index.js` and `lib/client.js` are **committed build output** and are what a
-git install runs; there is no `prepare` script, so a `github:` install never
-builds anything.
-
-The upstream npm tarball does not ship the build pipeline, and the host half of
-this fork was rebuilt by editing the emitted bundle, so **`src/` and `lib/` must
-be kept in sync by hand** for host-half changes. Two consequences worth knowing:
-
-- The client half's **types** target the retired `@deepseek-ai/dsh-client-runtime`
-  (last published at `0.1.1-rc.2`; it does not exist in 0.2.x), so the
-  `src/client/**` sources cannot be type-checked against 0.2.x as written. The
-  emitted `lib/client.js` is unaffected: it is a `window.__ModuleLoader__.load`
-  factory whose only requirements are the browser baseline modules
-  (`react`, `react-dom/client`, `react/jsx-runtime`).
-- `dsh.client.inject` in package.json listed three packages from the 0.1.x client
-  architecture. In 0.2.x `dsh-client-modules` still accepts the field but skips
-  names that have no row, so the list was dropped rather than kept as dead
-  configuration.
-
-Restoring a real pipeline (tsdown + `tsc -p tsconfig.build.json` + lightningcss,
-which is what upstream used) is the obvious next improvement.
-
-## How the fix was verified
-
-1. **Real ESM import against the 0.2.0-rc.1 packages.** The harness packages are
-   packed inside the desktop app's `app.asar`; extracting them and importing the
-   patched package from a directory that resolves them reproduces exactly what
-   `dsh-app-boot`'s interception layer does at runtime:
-
-   ```
-   IMPORT OK; exports = Config,WEBCHAT_GUIDANCE,WEBCHAT_SETTINGS_NAMESPACE,apply,inject,name
-   ```
-
-   The same harness against the unpatched upstream file reproduces
-   `does not provide an export named 'installSettingsSection'`.
-
-2. **Every 0.2.x surface the plugin touches was checked against the runtime:**
-   services `webServer` / `tools` / `systemPrompt` / `sessions` /
-   `sessionPersistence` / `llm` / `workspaceRegistry` all exist,
-   `systemPrompt.section({ name, order, text })` and
-   `webServer.register({ kind: 'exact' | 'prefix', path, handler })` are
-   unchanged, and `sessions.create(id, options)` still has its old shape.
-
-3. **Not verified end to end:** `webchat_transfer` writes into real session
-   storage, and exercising it needs a logged-in DeepSeek web session with a
-   stored conversation. The migration follows the published seam contract and
-   fails closed (the backend validates seq contiguity and refuses unknown
-   vocabulary), but a live transfer has not been run.
-
-## Testing a change
+## Testing
 
 ```bash
-# unit tests: activation + the transfer handle paths against a fake backend
 node --test
-
-# import/link check against a real harness install
-node -e "import('@jaychang1989/dsh-webchat').then(m => console.log(Object.keys(m)))"
 ```
 
-then reinstall into a profile and restart the app:
+Eleven cases: the host half is driven with a fake context and fake
+request/response objects (routes, method guards, strategy selection), and the
+browser half is executed with `vm` against a minimal DOM stand-in
+(`test/client.test.mjs`) that covers exactly the calls the bundle makes — enough
+to prove it mounts the entry and the panel, and that the button posts to the
+right route and reports the outcome.
 
-```bash
-dsh plugin --profile desktop add @jaychang1989/dsh-webchat     # npm
-dsh plugin --profile desktop add github:jaychang1989/dsh-webchat  # or from git
-```
+## Not verifiable from outside the app
 
-## Renaming rules
+`app-window` needs Electron's `BrowserWindow` in the plugin's own process. The
+desktop app does run its cordis loader in the Electron main process and imports
+`BrowserWindow` there itself, so the strategy is expected to work, but it cannot
+be exercised without restarting the desktop app — the fallbacks exist precisely
+because that expectation is untested here. The panel reports which strategy ran,
+so the first click answers it.
 
-The package name is read in exactly three places that must stay in step — the
-manifest `name`, the `name` of the row in `cordis.patch.yml`, and the `id` in
-the `window.__ModuleLoader__.load({...})` header of the emitted `lib/client.js`
-(dsh-client-modules keys every browser row by the package name, and the bundle
-registers its factory under the same id). Everything else that reads
-`dsh-webchat` — `/api/dsh-webchat/*` routes, the `~/.dsh/dsh-webchat` data dir,
-the `dsh-webchat` locale namespace, `data-dsh-webchat-*` attributes and the
-effect labels — is the plugin's own identity and deliberately does not follow
-the npm coordinate.
+Also known: a strategy-1 window is counted by Electron's `window-all-closed`, so
+closing the DSH main window while it is open leaves DSH running until that window
+closes too.
 
-The npm package is scoped (`@jaychang1989/dsh-webchat`) because the unscoped
-name belongs to the upstream project; `publishConfig.access: public` is what
-makes a scoped package publish publicly rather than as a paid private one.
+## History
 
+The package began as a fork of `xmuwenxiang/dsh-web-chat@0.2.0`, which targets
+dsh 0.1.0-rc.7 and cannot start on 0.2.x (`installSettingsSection` /
+`settingsNamespace` were removed from `@deepseek-ai/dsh-settings` in 0.1.7, so
+the host half failed at ESM link time). `0.3.0` retargeted it — the Loader-owned
+settings form, and the handle-based `sessionPersistence` API
+(`open`/`create` → `SessionHandle` `read`/`append`/`flush`/`close`). `0.4.0`
+removed everything except the launcher, as described above.

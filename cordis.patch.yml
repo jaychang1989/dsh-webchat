@@ -6,13 +6,14 @@
 #   dsh plugin --profile <name> add github:jaychang1989/dsh-webchat
 #
 # The row is a bare plugin by package name: the node half (exports ".") runs in
-# the host process (DeepSeek web browser engine, /api/dsh-webchat routes, agent
-# tools), and the `dsh.client` declaration in package.json makes the browser
-# half (exports "./client", served at /plugins/<id>/client.js) load in the web
-# GUI. `name` must be this package's manifest name verbatim (scoped names
-# included) — dsh-client-modules keys every browser row by it, and lib/client.js
-# registers its factory under the same id. `id` is the profile entry id; dsh >=
-# 0.1.7 also uses it as the settings form namespace, so keep it stable.
+# the host process — it registers the two /api/dsh-webchat routes and opens the
+# page in a window — and the `dsh.client` declaration in package.json makes the
+# browser half (exports "./client", served at /plugins/<id>/client.js) load in
+# the web GUI as the sidebar entry and its panel. `name` must be this package's
+# manifest name verbatim (scoped names included) — dsh-client-modules keys every
+# browser row by it, and lib/client.js registers its factory under the same id.
+# `id` is the profile entry id; dsh >= 0.1.7 also uses it as the settings form
+# namespace, so keep it stable.
 #
 # Note: the upstream package xmuwenxiang/dsh-web-chat inserts the same
 # `id: webchat`. Do not keep both installed in one profile — a duplicate entry

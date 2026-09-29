@@ -1,82 +1,81 @@
 # dsh-webchat
 
-为 [DeepSeek Harness](https://github.com/deepseek-ai/deepseek-harness) 提供的「Codex ChatGPT 模式」插件：通过真实浏览器驱动 [chat.deepseek.com](https://chat.deepseek.com)，用你的 DeepSeek 网页登录会话与网页模型对话，**无需 API 额度**。对话可「转移到 Harness」——蒸馏成可执行任务简报并新建 harness 会话作为开发上下文，也可把网页对话导入为 markdown 上下文，或让 harness agent 直接通过同一个网页会话提问。
+在 [DeepSeek Harness](https://github.com/deepseek-ai/deepseek-harness) 里打开 [chat.deepseek.com](https://chat.deepseek.com) 官方网页版：侧边栏一个入口，面板一个按钮，点开就是官方页面。
 
-> **这是 [xmuwenxiang/dsh-web-chat](https://github.com/xmuwenxiang/dsh-web-chat) 的维护分支（fork）**，已停止维护的上游版本在 dsh 0.2.x 上**无法启动**。本分支把插件重新对准 dsh 0.2.x 的插件 API，许可证沿用 Apache-2.0。
-> 差异与原因见 [MAINTAINING.md](./MAINTAINING.md) 与 [NOTICE](./NOTICE)。
+**不再重新实现聊天界面。** 官方网页版本身就是完整的客户端——模型选择、深度思考、智能搜索、历史记录、附件上传都在里面。本插件只负责把它打开，别的一概不管。
 
-## 与上游的差异
+## 为什么是「开一个窗口」，而不是「嵌在面板里」
 
-| 问题 | 上游（dsh 0.2.x 上） | 本分支 |
-| --- | --- | --- |
-| 启动 | `installSettingsSection` / `settingsNamespace` 在 dsh 0.1.7 起已从 `@deepseek-ai/dsh-settings` 移除，宿主半区在 ESM 链接期报错，整条 `webchat` entry `failed to import`，插件**完全不加载** | 改为使用 Loader 自带的设置表单（命名空间 = profile entry id，schema = 本包导出的 `Config`），插件不再自行注册设置段 |
-| 转移到 harness | `sessionPersistence.load(id)` / `persistence.append(id, events)` 在 dsh 0.2.x 已改为**句柄式** API，调用即抛错 | 迁到 `open(id, 'write')` / `create(header)` 返回的 `SessionHandle`，用 `handle.read` / `append` / `flush` / `close` |
-| 依赖声明 | `devDependencies` 停留在 `@deepseek-ai/*: ^0.1.0-rc.7` | 更新到 0.2.x，并补上运行时 `peerDependencies` 与 `engines.dsh` |
+两条路都被封死了，这是实测结论而非选择：
+
+- `chat.deepseek.com` 返回 **`Content-Security-Policy: frame-ancestors 'none'`** —— 任何 iframe 嵌入都会被浏览器拒绝；
+- DSH 桌面端两个窗口都是 **`webviewTag: false`**，且 `will-attach-webview` 被显式拦截 —— `<webview>` 也不可用。
+
+所以忠实呈现官方页面的唯一方式就是开一个真实窗口。
+
+## 打开顺序
+
+按钮会按顺序尝试，第一个成功的生效，面板上会显示实际用了哪种：
+
+1. **`app-window`** —— 由 DSH 桌面端进程直接创建的窗口（桌面端就是 Electron）。已经开着就聚焦，不会重复开第二个。
+2. **`app-window-shell`** —— 无边框的 Edge/Chrome 窗口（`--app=`），使用独立 `--user-data-dir`（`~/.dsh/dsh-webchat/app-window`），因此登录态与你的日常浏览器互不干扰。用于第 1 种被宿主拒绝的场景。
+3. **`system-browser`** —— 交给操作系统默认浏览器，保证按钮任何时候都有反应。
+
+登录一次即可：窗口自己的 profile 会保留登录态。
 
 ## 安装
-
-从 npm 安装（预构建产物，免构建、免 `allowBuilds` 授权）：
 
 ```bash
 dsh plugin --profile desktop add @jaychang1989/dsh-webchat
 ```
 
-或直接从本仓库安装（同样是预构建，`lib/` 已提交）：
+或直接从仓库安装：
 
 ```bash
 dsh plugin --profile desktop add github:jaychang1989/dsh-webchat
 ```
 
-> npm 包名带 scope，是因为不带 scope 的 `dsh-webchat` 属于已停止维护的上游项目。scope 不影响插件自身身份：entry id 仍是 `webchat`，`/api/dsh-webchat` 路由、数据目录与 locale 命名空间也都不变。
+> npm 包名带 scope，因为不带 scope 的 `dsh-webchat` 属于已停止维护的上游项目。scope 不影响插件身份：entry id 仍是 `webchat`。
 
-**从上游切换过来时**：上游包与本包都插入 `id: webchat` 这一行，同一个 profile 里同时存在会因 entry id 重复而在启动时报错。请先移除上游包：
+**从上游或本插件 0.3.x 切换过来时**：它们都插入 `id: webchat` 这一行，同一个 profile 里不能并存（entry id 重复会在启动时报错）。先移除旧的再加新的，然后重启桌面端。
 
-```bash
-dsh plugin --profile desktop remove dsh-webchat
-dsh plugin --profile desktop add github:jaychang1989/dsh-webchat
-```
+## 使用
 
-改完请**重启 DSH 桌面端**（启动期已判定失败的 entry 不会热重载）。
+1. 点侧边栏的「DeepSeek 网页」入口；
+2. 点面板里的「打开 chat.deepseek.com」；
+3. 在弹出的窗口里登录一次，之后正常使用官方网页版。
 
-## 首次使用
+## 与 0.3.x 的差异（这是一次大幅删减）
 
-1. 打开 Web GUI 侧边栏「网页聊天」入口。
-2. 点击「打开登录窗口」，在弹出的浏览器中完成 DeepSeek 网页登录。
-3. 登录成功后窗口会自动关闭，之后即可正常聊天 / 转移。
-
-## 特性
-
-- **网页聊天**：复用 DeepSeek 网页端登录，流式获取回复，支持「深度思考（R1）」与「智能搜索」开关。
-- **转移到 Harness**：一键把当前网页对话蒸馏成任务简报（首条消息即简报）并创建新 harness 会话继续开发，或「延续到已有会话」——把简报作为新消息追加进指定会话；转移时可选择目标工作区（未选则归入「未分组」）。
-- **从网页恢复会话**：把网页端已存在但本地未收录的会话拉回本地存储（面板「从网页恢复」按钮 / `webchat_recover`）。
-- **导入为上下文**：把存储的网页对话导出为 markdown 上下文。
-- **Agent 工具**：`webchat_status` / `webchat_send` / `webchat_recover` / `webchat_import` / `webchat_transfer`，harness agent 可直接调用。
-- **无感登录**：首次使用弹出可见浏览器窗口完成登录，登录后窗口自动关闭，后续聊天在无头浏览器中进行。
-
-## 配置
-
-插件设置跟随 profile entry（`webchat`）自动生成，可调整：`browserChannel`（浏览器渠道，默认 auto）、`browserExecutablePath`（显式浏览器路径）、`browserProxy`（代理）、`browserHeadless`（聊天是否无头，默认 true——登录窗口始终可见且登录后自动关闭）、`replyTimeoutMs`（回复等待上限）、`transferDistill` / `transferProvider` / `transferModel`（转移时的蒸馏模型）、`transferMaxTokens`（最终简报输出上限，默认 4096）、`transferChunkTokens`（长对话分块摘要每段上限，默认 1024）。
+| 0.3.x | 0.4.0 |
+| --- | --- |
+| 用 Playwright 驱动网页，自研聊天面板重新渲染消息 | 不再驱动网页，直接开官方页面；自研面板删除 |
+| 5 个 agent 工具（`webchat_status/send/recover/import/transfer`） | 全部删除 |
+| 「转移到 harness」「从网页恢复」「导入」「导出」 | 全部删除 |
+| 本地会话存储 `~/.dsh/dsh-webchat/transcripts.json` | 删除（只留窗口 profile 目录） |
+| 15 条 `/api/dsh-webchat/*` 路由 | 只剩 2 条：`state` / `open` |
+| 依赖 `playwright-core`，客户端产物需 React + 构建器 | **零运行时依赖**，客户端为纯 DOM，无构建步骤 |
+| 约 3800 行（构建产物） | 约 700 行（手写 JS） |
 
 ## 环境要求
 
 - DeepSeek Harness **0.2.0-rc.1 或更新的 0.2.x**
 - Node.js >= 22
-- 已安装 Google Chrome 或 Microsoft Edge
-- 首次登录需要可交互的图形环境（弹出登录窗口）
+- 第 2 种策略（无边框窗口）需要本机装有 Edge 或 Chrome；第 1 种策略不需要
 
 ## 限制
 
-- 网页端受 DeepSeek 官方风控；页面改版或操作失败时返回错误而非崩溃。
-- 密码/会话凭据保存在本地私有目录（profile），请勿外泄。
-- 「延续到已有会话」在 dsh 0.2.x 上需要该会话未被其它写入方占用（例如未在界面上打开并持有写租约）；被占用时会返回明确错误而不是静默失败。
+- 官方网页端受 DeepSeek 官方风控；页面打不开时插件只负责把页面交出去，不介入其登录或请求。
+- 第 1 种策略创建的窗口由 DSH 进程拥有：若你先关掉 DSH 主窗口、而它仍开着，DSH 不会退出（Electron 的 `window-all-closed` 语义）。关掉该窗口即可。
+- 插件被重载时不会主动关闭已经打开的窗口（避免一次设置变更就关掉你正在看的会话）。
 
-## 开发
-
-`lib/` 是随仓库提交的编译产物，从 git 安装直接使用它。宿主半区改动需要同步 `src/` 与 `lib/`（构建流水线尚未恢复，见 [MAINTAINING.md](./MAINTAINING.md)）。
+## 开发与测试
 
 ```bash
-node --test        # 运行单元测试（Node 内置测试运行器）
+node --test        # 11 个用例：宿主路由、窗口策略选择、浏览器半区在 DOM 桩里的挂载与按钮行为
 ```
+
+没有构建步骤：`lib/index.js` 与 `lib/client.js` 就是手写的运行时代码。详见 [MAINTAINING.md](./MAINTAINING.md)。
 
 ## License
 

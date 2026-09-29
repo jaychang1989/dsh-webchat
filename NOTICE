@@ -1,11 +1,11 @@
 dsh-webchat
 Copyright 2026 jaychang1989
 
-This product is a maintained fork of dsh-web-chat
+This product is a fork of dsh-web-chat
 (https://github.com/xmuwenxiang/dsh-web-chat), Copyright the dsh-web-chat
 authors, licensed under the Apache License, Version 2.0.
 
-The fork retargets the plugin at the DeepSeek Harness 0.2.x plugin APIs:
+0.3.0 retargeted the plugin at the DeepSeek Harness 0.2.x plugin APIs:
 
   * the settings section is no longer registered by the plugin
     (`installSettingsSection` / `settingsNamespace` were removed from
@@ -15,4 +15,11 @@ The fork retargets the plugin at the DeepSeek Harness 0.2.x plugin APIs:
     (`sessionPersistence.open` / `create` + handle `read` / `append` / `flush`)
     instead of the retired service-level `load` / `append` pair.
 
-See MAINTAINING.md for the exact files and the shipped-build policy.
+0.4.0 reduced the package to a launcher: it opens the official
+chat.deepseek.com web app in a window instead of driving the page and
+re-rendering the conversation. The custom chat panel, the local transcript
+store, the five `webchat_*` agent tools, the transfer/distillation code and
+thirteen of the fifteen HTTP routes were removed, along with the
+`playwright-core` runtime dependency and the React-based client build.
+
+See MAINTAINING.md for the current structure and the constraints behind it.
