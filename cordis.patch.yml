@@ -13,11 +13,9 @@
 # manifest name verbatim (scoped names included) — dsh-client-modules keys every
 # browser row by it, and lib/client.js registers its factory under the same id.
 # `id` is the profile entry id; dsh >= 0.1.7 also uses it as the settings form
-# namespace, so keep it stable.
-#
-# Note: the upstream package xmuwenxiang/dsh-web-chat inserts the same
-# `id: webchat`. Do not keep both installed in one profile — a duplicate entry
-# id is rejected at boot.
+# namespace, so keep it stable. It must be unique per profile: a second package
+# inserting the same `webchat` id cannot be installed alongside this one — the
+# duplicate is rejected at boot.
 - insert:
     - id: webchat
       name: '@jaychang1989/dsh-webchat'

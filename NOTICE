@@ -1,25 +1,26 @@
 dsh-webchat
 Copyright 2026 jaychang1989
 
-This product is a fork of dsh-web-chat
+This package is a fork of dsh-web-chat
 (https://github.com/xmuwenxiang/dsh-web-chat), Copyright the dsh-web-chat
-authors, licensed under the Apache License, Version 2.0.
+authors, licensed under the Apache License, Version 2.0. A copy of that license
+is in LICENSE.
 
-0.3.0 retargeted the plugin at the DeepSeek Harness 0.2.x plugin APIs:
+Reused from that project, and the reason this notice exists:
 
-  * the settings section is no longer registered by the plugin
-    (`installSettingsSection` / `settingsNamespace` were removed from
-    `@deepseek-ai/dsh-settings` in 0.1.7; forms are now derived from the
-    profile entry and its exported `Config`);
-  * session persistence is addressed through per-session handles
-    (`sessionPersistence.open` / `create` + handle `read` / `append` / `flush`)
-    instead of the retired service-level `load` / `append` pair.
+  * the plugin scaffolding — the dual-half packaging (a host half plus a
+    `dsh.client` browser half), the `cordis.patch.yml` bundle row, and the
+    `window.__ModuleLoader__.load` form of the emitted client bundle;
+  * the approach to injecting a sidebar entry row at the DOM level, with its
+    self-healing MutationObservers, and the base styling that came with it.
 
-0.4.0 reduced the package to a launcher: it opens the official
-chat.deepseek.com web app in a window instead of driving the page and
-re-rendering the conversation. The custom chat panel, the local transcript
-store, the five `webchat_*` agent tools, the transfer/distillation code and
-thirteen of the fifteen HTTP routes were removed, along with the
-`playwright-core` runtime dependency and the React-based client build.
+Written here:
 
-See MAINTAINING.md for the current structure and the constraints behind it.
+  * the launcher behaviour — opening the official chat.deepseek.com page in a
+    window, the three window strategies and their ordering;
+  * the entry-as-action interaction (the entry itself opens the page, with the
+    busy state and the result toast);
+  * the host routes, the tests and this documentation.
+
+The package no longer drives the page, stores transcripts, exposes agent tools
+or reimplements a chat interface.

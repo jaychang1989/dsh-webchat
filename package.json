@@ -1,7 +1,7 @@
 {
   "name": "@jaychang1989/dsh-webchat",
   "version": "0.4.1",
-  "description": "Opens the official DeepSeek web app (chat.deepseek.com) in a window from inside DeepSeek Harness: one sidebar entry that opens the page directly, no reimplementation — the official page keeps its model picker, deep think, smart search, history and attachments. Fork of xmuwenxiang/dsh-web-chat, reduced to a launcher.",
+  "description": "Opens the official DeepSeek web app (chat.deepseek.com) in a window from DeepSeek Harness: one sidebar entry that opens the page directly, so the official client keeps its model picker, deep think, smart search, history and attachments. No chat UI, no agent tools, no runtime dependencies.",
   "keywords": [
     "dsh",
     "deepseek-harness",

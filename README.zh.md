@@ -1,27 +1,22 @@
 # dsh-webchat
 
-在 [DeepSeek Harness](https://github.com/deepseek-ai/deepseek-harness) 里打开 [chat.deepseek.com](https://chat.deepseek.com) 官方网页版：侧边栏一个入口，**点一下就直接打开官方页面**。
+在 [DeepSeek Harness](https://github.com/deepseek-ai/deepseek-harness) 里一键打开 [chat.deepseek.com](https://chat.deepseek.com) 官方网页版。
 
-**不再重新实现聊天界面。** 官方网页版本身就是完整的客户端——模型选择、深度思考、智能搜索、历史记录、附件上传都在里面。本插件只负责把它打开，别的一概不管。
+**侧边栏一个入口，点一下，官方页面就开在一个窗口里。**
 
-## 为什么是「开一个窗口」，而不是「嵌在面板里」
+仅此而已。不做聊天界面，不做会话存储，不做 agent 工具——官方网页版本身就是完整的客户端，模型选择、深度思考、智能搜索、历史记录、附件上传都在里面。
 
-两条路都被封死了，这是实测结论而非选择：
+## 为什么不嵌在面板里
 
-- `chat.deepseek.com` 返回 **`Content-Security-Policy: frame-ancestors 'none'`** —— 任何 iframe 嵌入都会被浏览器拒绝；
-- DSH 桌面端两个窗口都是 **`webviewTag: false`**，且 `will-attach-webview` 被显式拦截 —— `<webview>` 也不可用。
+三条路都被封死，这是实测结果而不是取舍：
 
-所以忠实呈现官方页面的唯一方式就是开一个真实窗口。
+| 方式 | 实测结果 |
+| --- | --- |
+| `<iframe>` | `chat.deepseek.com` 返回 `Content-Security-Policy: frame-ancestors 'none'`，浏览器直接拒绝渲染 |
+| Electron `<webview>` | 桌面端两个窗口都是 `webviewTag: false`，且 `will-attach-webview` 被显式拦截 |
+| 桌面端内置的 `WebContentsView` | 只服务平台页面（账号/充值），导航被限制在该 origin，第三方插件拿不到 |
 
-## 打开顺序
-
-点击入口后会按顺序尝试，第一个成功的生效，结果用一条短提示告诉你实际用了哪种：
-
-1. **`app-window`** —— 由 DSH 桌面端进程直接创建的窗口（桌面端就是 Electron）。已经开着就聚焦，不会重复开第二个。
-2. **`app-window-shell`** —— 无边框的 Edge/Chrome 窗口（`--app=`），使用独立 `--user-data-dir`（`~/.dsh/dsh-webchat/app-window`），因此登录态与你的日常浏览器互不干扰。用于第 1 种被宿主拒绝的场景。
-3. **`system-browser`** —— 交给操作系统默认浏览器，保证按钮任何时候都有反应。
-
-登录一次即可：窗口自己的 profile 会保留登录态。
+所以忠实呈现官方页面的唯一方式，就是开一个真实窗口。
 
 ## 安装
 
@@ -35,49 +30,57 @@ dsh plugin --profile desktop add @jaychang1989/dsh-webchat
 dsh plugin --profile desktop add github:jaychang1989/dsh-webchat
 ```
 
-> npm 包名带 scope，因为不带 scope 的 `dsh-webchat` 属于已停止维护的上游项目。scope 不影响插件身份：entry id 仍是 `webchat`。
+> npm 包名带 scope，因为不带 scope 的 `dsh-webchat` 已被占用。scope 不影响插件身份：entry id 仍是 `webchat`。
 
-**从上游或本插件 0.3.x 切换过来时**：它们都插入 `id: webchat` 这一行，同一个 profile 里不能并存（entry id 重复会在启动时报错）。先移除旧的再加新的，然后重启桌面端。
+安装后**重启桌面端**。
 
 ## 使用
 
-1. 点侧边栏的「DeepSeek 网页」入口 —— 页面直接打开，不需要再点第二次；
-2. 在弹出的窗口里登录一次，之后正常使用官方网页版。
+1. 点侧边栏的「DeepSeek 网页」入口；
+2. 在弹出的窗口里登录一次 DeepSeek，之后登录态会保留。
 
-点击后右下角会有一条短提示说明结果：`已打开 DeepSeek 网页` / `已交给系统默认浏览器打开` / 失败原因（例如 `HTTP 404`，通常意味着宿主半区还是旧版本，重启桌面端即可）。
+点击后右下角会有一条短提示说明结果。
 
-## 与 0.3.x 的差异（这是一次大幅删减）
+## 它怎么打开页面
 
-| 0.3.x | 0.4.0 |
-| --- | --- |
-| 用 Playwright 驱动网页，自研聊天面板重新渲染消息 | 不再驱动网页，直接开官方页面；自研面板删除 |
-| 5 个 agent 工具（`webchat_status/send/recover/import/transfer`） | 全部删除 |
-| 「转移到 harness」「从网页恢复」「导入」「导出」 | 全部删除 |
-| 本地会话存储 `~/.dsh/dsh-webchat/transcripts.json` | 删除（只留窗口 profile 目录） |
-| 15 条 `/api/dsh-webchat/*` 路由 | 只剩 2 条：`state` / `open` |
-| 依赖 `playwright-core`，客户端产物需 React + 构建器 | **零运行时依赖**，客户端为纯 DOM，无构建步骤 |
-| 约 3800 行（构建产物） | 约 700 行（手写 JS） |
+按顺序尝试，第一个成功的生效，提示条会告诉你实际用了哪一种：
+
+1. **应用窗口** —— 由 DSH 桌面端进程自己创建的窗口（桌面端就是 Electron）。已经开着就聚焦，不会重复开。
+2. **无边框窗口** —— Edge/Chrome 的 `--app=` 模式，使用独立 `--user-data-dir`（`~/.dsh/dsh-webchat/app-window`），因此登录态与你日常浏览器互不干扰。用于第 1 种拿不到 Electron 的场景。
+3. **系统默认浏览器** —— 兜底，保证点击一定有反应。
+
+三种都不需要额外配置。
 
 ## 环境要求
 
 - DeepSeek Harness **0.2.0-rc.1 或更新的 0.2.x**
 - Node.js >= 22
-- 第 2 种策略（无边框窗口）需要本机装有 Edge 或 Chrome；第 1 种策略不需要
+- 第 2 种方式需要本机装有 Edge 或 Chrome；第 1 种不需要
 
-## 限制
+## 已知限制
 
-- 官方网页端受 DeepSeek 官方风控；页面打不开时插件只负责把页面交出去，不介入其登录或请求。
-- 第 1 种策略创建的窗口由 DSH 进程拥有：若你先关掉 DSH 主窗口、而它仍开着，DSH 不会退出（Electron 的 `window-all-closed` 语义）。关掉该窗口即可。
-- 插件被重载时不会主动关闭已经打开的窗口（避免一次设置变更就关掉你正在看的会话）。
+- 官方网页端有它自己的风控和登录流程，插件只负责把页面交出去，不介入其请求。
+- 第 1 种方式创建的窗口由 DSH 进程拥有：如果你先关掉 DSH 主窗口、而它仍开着，DSH 不会退出（Electron 的 `window-all-closed` 语义）。把它一起关掉即可。
+- 插件被重载时不会主动关闭已经打开的窗口——否则一次设置变更就会把你正在看的会话关掉。
+
+## 排查
+
+| 现象 | 原因 / 处理 |
+| --- | --- |
+| 提示条显示 `HTTP 404` | 宿主的旧版本还在内存里（宿主半区只在进程启动时加载，客户端半区每次刷新页面重新取）。**重启桌面端**即可 |
+| 提示条显示「已交给系统默认浏览器打开」 | 前两种方式都不可用；看窗口是否被宿主拒绝，或本机没装 Edge/Chrome |
+| 入口没出现在侧边栏 | 确认 profile 的 `dsh.profile.bundles` 里有 `@jaychang1989/dsh-webchat`，并重启桌面端 |
 
 ## 开发与测试
 
 ```bash
-node --test        # 11 个用例：宿主路由、窗口策略选择、浏览器半区在 DOM 桩里的挂载与按钮行为
+node --test
 ```
 
-没有构建步骤：`lib/index.js` 与 `lib/client.js` 就是手写的运行时代码。详见 [MAINTAINING.md](./MAINTAINING.md)。
+13 个用例：宿主两条路由与窗口策略选择，以及浏览器半区在 DOM 桩里真实执行（挂载入口、点击后请求正确路由、成功/兜底/失败是否都如实提示）。
 
-## License
+没有构建步骤——`lib/index.js` 与 `lib/client.js` 就是手写的运行时代码，包内**零运行时依赖**。细节见 [MAINTAINING.md](./MAINTAINING.md)。
 
-[Apache-2.0](./LICENSE) — 原始版权归 [xmuwenxiang/dsh-web-chat](https://github.com/xmuwenxiang/dsh-web-chat) 作者所有，详见 [NOTICE](./NOTICE)。
+## 来源与许可
+
+[Apache-2.0](./LICENSE)。本包最初由 [xmuwenxiang/dsh-web-chat](https://github.com/xmuwenxiang/dsh-web-chat) 分叉而来：沿用了它的插件骨架（双半区打包、`cordis.patch.yml` 行、浏览器 bundle 的 `window.__ModuleLoader__.load` 形式）与侧边栏入口的 DOM 注入思路，当前功能（打开官方页面的窗口策略、入口即动作、提示条）是新写的。版权与许可声明见 [NOTICE](./NOTICE)。
