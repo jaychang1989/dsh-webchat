@@ -56,7 +56,7 @@
     "cordis.patch.yml",
     "NOTICE",
     "README.md",
-    "README.zh.md"
+    "README.en.md"
   ],
   "scripts": {
     "test": "node --test"

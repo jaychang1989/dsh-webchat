@@ -1,86 +1,88 @@
 # dsh-webchat
 
-Opens the official [chat.deepseek.com](https://chat.deepseek.com) web app from [DeepSeek Harness](https://github.com/deepseek-ai/deepseek-harness) in one click.
+**简体中文** | [English](./README.en.md)
 
-**One sidebar entry. Click it, and the official page opens in a window.**
+在 [DeepSeek Harness](https://github.com/deepseek-ai/deepseek-harness) 里一键打开 [chat.deepseek.com](https://chat.deepseek.com) 官方网页版。
 
-That is the whole plugin. No chat UI, no transcript store, no agent tools — the official web app already is the client: model picker, deep think, smart search, history and attachments all live there.
+**侧边栏一个入口，点一下，官方页面就开在一个窗口里。**
 
-## Why it opens a window instead of a pane
+仅此而已。不做聊天界面，不做会话存储，不做 agent 工具——官方网页版本身就是完整的客户端，模型选择、深度思考、智能搜索、历史记录、附件上传都在里面。
 
-Three routes are closed, and these are measurements rather than preferences:
+## 为什么不嵌在面板里
 
-| Route | Measured result |
+三条路都被封死，这是实测结果而不是取舍：
+
+| 方式 | 实测结果 |
 | --- | --- |
-| `<iframe>` | `chat.deepseek.com` answers with `Content-Security-Policy: frame-ancestors 'none'`, so the browser refuses to render it in a frame |
-| Electron `<webview>` | both desktop windows run with `webviewTag: false`, and `will-attach-webview` is explicitly blocked |
-| The desktop app's own `WebContentsView` | reserved for platform pages (account/top-up) with navigation pinned to that origin; not reachable from a plugin |
+| `<iframe>` | `chat.deepseek.com` 返回 `Content-Security-Policy: frame-ancestors 'none'`，浏览器直接拒绝渲染 |
+| Electron `<webview>` | 桌面端两个窗口都是 `webviewTag: false`，且 `will-attach-webview` 被显式拦截 |
+| 桌面端内置的 `WebContentsView` | 只服务平台页面（账号/充值），导航被限制在该 origin，第三方插件拿不到 |
 
-A real window is therefore the only faithful way to show the official page.
+所以忠实呈现官方页面的唯一方式，就是开一个真实窗口。
 
-## Install
+## 安装
 
 ```bash
 dsh plugin --profile desktop add @jaychang1989/dsh-webchat
 ```
 
-Or straight from this repository:
+或直接从仓库安装：
 
 ```bash
 dsh plugin --profile desktop add github:jaychang1989/dsh-webchat
 ```
 
-> The npm package is scoped because the unscoped `dsh-webchat` name is taken. The scope does not change the plugin's identity: the entry id stays `webchat`.
+> npm 包名带 scope，因为不带 scope 的 `dsh-webchat` 已被占用。scope 不影响插件身份：entry id 仍是 `webchat`。
 
-**Restart the desktop app after installing.**
+安装后**重启桌面端**。
 
-## Use
+## 使用
 
-1. Click the "DeepSeek 网页 / DeepSeek Web" entry in the sidebar.
-2. Sign in to DeepSeek once in the window it opens; the session is kept afterwards.
+1. 点侧边栏的「DeepSeek 网页」入口；
+2. 在弹出的窗口里登录一次 DeepSeek，之后登录态会保留。
 
-A short toast in the corner reports the outcome.
+点击后右下角会有一条短提示说明结果。
 
-## How it opens the page
+## 它怎么打开页面
 
-Tried in order; the first that works wins, and the toast tells you which one it was:
+按顺序尝试，第一个成功的生效，提示条会告诉你实际用了哪一种：
 
-1. **App window** — a window created by the DSH desktop process itself (the desktop app is Electron). An already-open one is focused instead of duplicated.
-2. **Chromeless window** — Edge/Chrome in `--app=` mode with its own `--user-data-dir` (`~/.dsh/dsh-webchat/app-window`), so its login stays separate from your everyday browser. Used when (1) cannot reach Electron.
-3. **System browser** — the fallback, so a click always does something.
+1. **应用窗口** —— 由 DSH 桌面端进程自己创建的窗口（桌面端就是 Electron）。已经开着就聚焦，不会重复开。
+2. **无边框窗口** —— Edge/Chrome 的 `--app=` 模式，使用独立 `--user-data-dir`（`~/.dsh/dsh-webchat/app-window`），因此登录态与你日常浏览器互不干扰。用于第 1 种拿不到 Electron 的场景。
+3. **系统默认浏览器** —— 兜底，保证点击一定有反应。
 
-None of the three needs configuration.
+三种都不需要额外配置。
 
-## Requirements
+## 环境要求
 
-- DeepSeek Harness **0.2.0-rc.1 or a newer 0.2.x**
+- DeepSeek Harness **0.2.0-rc.1 或更新的 0.2.x**
 - Node.js >= 22
-- Strategy 2 needs Edge or Chrome installed; strategy 1 does not
+- 第 2 种方式需要本机装有 Edge 或 Chrome；第 1 种不需要
 
-## Known limitations
+## 已知限制
 
-- The DeepSeek web front end has its own rate limiting and sign-in flow; the plugin only hands the page over and does not mediate its requests.
-- A strategy-1 window is owned by the DSH process: if you close the DSH main window while it is still open, DSH will not quit (Electron's `window-all-closed`). Close that window too.
-- Reloading the plugin does not close a window that is already open — otherwise a settings change would close the conversation you are reading.
+- 官方网页端有它自己的风控和登录流程，插件只负责把页面交出去，不介入其请求。
+- 第 1 种方式创建的窗口由 DSH 进程拥有：如果你先关掉 DSH 主窗口、而它仍开着，DSH 不会退出（Electron 的 `window-all-closed` 语义）。把它一起关掉即可。
+- 插件被重载时不会主动关闭已经打开的窗口——否则一次设置变更就会把你正在看的会话关掉。
 
-## Troubleshooting
+## 排查
 
-| Symptom | Cause / fix |
+| 现象 | 原因 / 处理 |
 | --- | --- |
-| The toast says `HTTP 404` | The host half in memory is an older version (the host half loads once per process; the client half is re-fetched on every page load). **Restart the desktop app** |
-| The toast says it handed the page to the system browser | Strategies 1 and 2 were both unavailable — check whether the host refused a window, or whether Edge/Chrome is installed |
-| The entry is missing from the sidebar | Check that `@jaychang1989/dsh-webchat` is in the profile's `dsh.profile.bundles`, then restart the desktop app |
+| 提示条显示 `HTTP 404` | 宿主的旧版本还在内存里（宿主半区只在进程启动时加载，客户端半区每次刷新页面重新取）。**重启桌面端**即可 |
+| 提示条显示「已交给系统默认浏览器打开」 | 前两种方式都不可用；看窗口是否被宿主拒绝，或本机没装 Edge/Chrome |
+| 入口没出现在侧边栏 | 确认 profile 的 `dsh.profile.bundles` 里有 `@jaychang1989/dsh-webchat`，并重启桌面端 |
 
-## Development and tests
+## 开发与测试
 
 ```bash
 node --test
 ```
 
-Thirteen cases: the host's two routes and its window-strategy selection, plus the browser half executed against a DOM stand-in (it mounts the entry, posts to the right route on click, and reports success, handoff and failure honestly).
+13 个用例：宿主两条路由与窗口策略选择，以及浏览器半区在 DOM 桩里真实执行（挂载入口、点击后请求正确路由、成功/兜底/失败是否都如实提示）。
 
-There is no build step — `lib/index.js` and `lib/client.js` are the hand-written runtime, and the package has **zero runtime dependencies**. See [MAINTAINING.md](./MAINTAINING.md).
+没有构建步骤——`lib/index.js` 与 `lib/client.js` 就是手写的运行时代码，包内**零运行时依赖**。细节见 [MAINTAINING.md](./MAINTAINING.md)。
 
-## Origin and license
+## 来源与许可
 
-[Apache-2.0](./LICENSE). This package started as a fork of [xmuwenxiang/dsh-web-chat](https://github.com/xmuwenxiang/dsh-web-chat): it reuses that project's plugin scaffolding (the dual-half packaging, the `cordis.patch.yml` row, the `window.__ModuleLoader__.load` bundle form) and its approach to injecting a sidebar entry, while the current behaviour — the window strategies, the entry-as-action, the toast — is new. See [NOTICE](./NOTICE) for the copyright and license statements.
+[Apache-2.0](./LICENSE)。本包最初由 [xmuwenxiang/dsh-web-chat](https://github.com/xmuwenxiang/dsh-web-chat) 分叉而来：沿用了它的插件骨架（双半区打包、`cordis.patch.yml` 行、浏览器 bundle 的 `window.__ModuleLoader__.load` 形式）与侧边栏入口的 DOM 注入思路，当前功能（打开官方页面的窗口策略、入口即动作、提示条）是新写的。版权与许可声明见 [NOTICE](./NOTICE)。
