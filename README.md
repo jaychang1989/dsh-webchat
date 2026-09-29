@@ -54,12 +54,17 @@ dsh plugin --profile desktop add github:jaychang1989/dsh-webchat
 
 ## 登录状态
 
-桌面端给浏览器访客的分区是**进程内**的（每次运行随机命名、不带 `persist:`），所以 cookie 和站点存储本来会随退出一起消失——DSH 自带的侧栏浏览器也是这样。本插件把这个接管了：宿主半区运行在 **Electron 主进程里**，因此能读到该分区的 cookie（**含 HttpOnly**，渲染进程永远看不到），它会在你使用过程中把 cookie 与页面的 localStorage 快照下来，下次启动时**先回灌、再加载页面**。
+桌面端给浏览器访客的分区是**进程内**的（每次运行随机命名、不带 `persist:`），所以 cookie 和站点存储本来会随退出一起消失——DSH 自带的侧栏浏览器也是这样。本插件把这个接管了，用**两条通道**——因为宿主半区不一定拿得到 Electron：
+
+1. **站点存储**（localStorage）与**页面自己的 cookie**：由页面侧通用搬运，不依赖任何键名，也不依赖 Electron；
+2. **分区 cookie（含 HttpOnly）**：只有宿主的 Electron 主进程读得到。能拿到就走这条；`GET /api/dsh-webchat/state` 的 `session.electron` 会如实说明。
+
+顺序：拿到租约 → 回灌（cookie 在首次导航前写回，页面第一个请求就带着它）→ 首次加载完成后再写入存储与 cookie → 刷新一次 → 之后按使用情况快照。
 
 - 文件位置：`%USERPROFILE%\.dsh\dsh-webchat\session.json`
 - **删掉这个文件就等于退出登录**（本插件不会再有别的残留）。
 - 文件里是**明文**会话凭据。它在你自己的用户目录下（默认只有你的账户可读），但确实不如浏览器那种加密 cookie 库。
-- 若 DeepSeek 更换登录态的存储方式，可能要重新登录一次——之后会自动重新快照。
+- 如果 DeepSeek 的登录态是 HttpOnly cookie、而宿主又拿不到 Electron，就只能保留存储部分——那种情况下重登仍会发生。
 
 ## 已知限制
 

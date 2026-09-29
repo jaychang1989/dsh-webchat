@@ -54,12 +54,17 @@ Click again to collapse the panel. Switching to another panel (Plugins, Automati
 
 ## Staying signed in
 
-The host hands browser guests a **process-lifetime** partition (a fresh random name per run, with no `persist:` prefix), so cookies and site storage would die with the app — DSH's own side-card browser behaves the same way. This plugin takes that over: its host half runs inside the **Electron main process**, which is the only place a partition's cookies can be read (**HttpOnly ones included**; a renderer can never see them). It snapshots the cookies and the page's localStorage while you use the page, and puts them back **before** the page loads on the next run.
+The host hands browser guests a **process-lifetime** partition (a fresh random name per run, with no `persist:` prefix), so cookies and site storage would die with the app — DSH's own side-card browser behaves the same way. This plugin takes that over through **two channels**, because the host half does not always reach Electron:
+
+1. **Site storage** (localStorage) and the **page's own cookies**: carried by the guest itself, generically — no key names, no Electron.
+2. **Partition cookies, HttpOnly included**: only the Electron main process can read those. Used when reachable; `session.electron` in `GET /api/dsh-webchat/state` says plainly whether it is.
+
+The order: reserve the lease → restore first (cookies land before the first navigation, so the page's very first request already carries them) → write storage and the page's cookies once the first load finishes → reload once → snapshot as the page is used.
 
 - Location: `%USERPROFILE%\.dsh\dsh-webchat\session.json`
 - **Deleting that file logs the plugin's guest out** — it keeps nothing else behind.
 - The file holds live session credentials in **plain text**. It sits in your own profile directory (user-private by default), but it is not as protected as a browser's encrypted cookie store.
-- If DeepSeek changes how it stores the session you may have to sign in once more; the snapshot is then taken again automatically.
+- If DeepSeek keeps the session in an HttpOnly cookie *and* the host half cannot reach Electron, only the storage part can be kept — signing in again would then still happen.
 
 ## Known limitations
 

@@ -543,7 +543,7 @@ test('the session is snapshotted as the page is used', async () => {
   await settle()
 
   const frame = document.created.find((el) => el.tagName === 'WEBVIEW')
-  frame.reply = JSON.stringify([['userToken', 'secret']])
+  frame.reply = JSON.stringify({ storage: [['userToken', 'secret']], cookie: 'ds_session=abc' })
   frame.dispatch('dom-ready', {})
   await settle()
   frame.dispatch('did-finish-load', {})
@@ -553,6 +553,7 @@ test('the session is snapshotted as the page is used', async () => {
   assert.equal(saves.length, 1, 'a finished load snapshots the session')
   assert.equal(saves[0].body.partition, 'dsh-sidebar-browser-test')
   assert.deepEqual(saves[0].body.storage, [['userToken', 'secret']])
+  assert.equal(saves[0].body.cookie, 'ds_session=abc', 'the page cookie travels with the storage')
 
   assert.equal(intervals.size, 1, 'the guest keeps a periodic snapshot running')
   assert.equal([...intervals.values()][0].ms, 30000)
@@ -588,7 +589,7 @@ test('plugin disposal snapshots once more and stops the timer', async () => {
   rendered.mount(element('div', document))
   await settle()
   const frame = document.created.find((el) => el.tagName === 'WEBVIEW')
-  frame.reply = JSON.stringify([['userToken', 'secret']])
+  frame.reply = JSON.stringify({ storage: [['userToken', 'secret']], cookie: 'ds_session=abc' })
 
   const cleanups = effects.map((fn) => fn()).filter((fn) => typeof fn === 'function')
   cleanups.forEach((fn) => fn())

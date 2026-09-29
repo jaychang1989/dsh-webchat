@@ -57,24 +57,28 @@ guest.container.style.display = alive ? "block" : "none"
 
 宿主给访客的分区是 `dsh-sidebar-browser-${randomUUID()}`：**不带 `persist:` 前缀**（Electron 里即内存分区），而且**每次运行都是新名字**。所以 cookie 与站点存储随进程一起消失——DSH 自带的侧栏浏览器也一样。插件无法申请别的分区：主进程在 `will-attach-webview` 里硬校验 `params.partition !== lease.partition → preventDefault()`。
 
-于是本插件自己接管这件事，分两步：
+于是本插件自己接管这件事，用**两条彼此独立的通道**：
 
-1. **cookie 由宿主半区搬运。** 它跑在 **Electron 主进程**里，所以能 `session.fromPartition(partition).cookies` —— 这是渲染进程永远做不到的（`document.cookie` 看不到 HttpOnly，而登录态常常正在那儿）。
-2. **站点存储由浏览器半区搬运。** 用 `<webview>.executeJavaScript` 通用地读写 localStorage：不依赖任何具体键名，因此 DeepSeek 换键也不会失效。
+1. **站点存储 + 页面自己的 cookie**，由浏览器半区通用搬运：`<webview>.executeJavaScript` 读写 localStorage（不依赖任何具体键名）与 `document.cookie`。**这条通道不依赖 Electron**，是底线。
+2. **分区 cookie（含 HttpOnly）**，由宿主半区搬运：它跑在 **Electron 主进程**里才能 `session.fromPartition(partition).cookies`——渲染进程永远读不到 HttpOnly。
+
+**教训（真实踩过，别再犯）**：最初 `POST /session/save` 在写文件之前先取 Electron session，拿不到就整个请求失败——于是**快照文件从来没被写出来**，连本来能独立工作的 localStorage 通道也被一起拖死了。现在的规矩是：**Electron 只是增强，不是前提**。取不到就记下原因（返回体里的 `error`），照常写快照。
+
+关于 Electron 可达性：`import('electron')` 在本加载器下会解析出一个**没有具名导出**的命名空间（真实 API 在 `default` 上），而 `createRequire(...)('electron')` 会被拦成 `Cannot find module`。所以 `electronApi()` 会**同时接受 `mod` 与 `mod.default`** 两种形状，并把两条探测的失败原因拼起来回报。
 
 时序（顺序是有原因的，别随意调整）：
 
 - **回灌 cookie 必须在首次导航之前**：拿到租约 → `POST /session/restore`（宿主把快照里的 cookie 写进本次的分区）→ 才 `loadURL`。这样页面的第一个请求就带着登录态。
-- **回灌 localStorage 只能在页面已在自身 origin 之后**：`dom-ready` → 导航 → `did-finish-load` 之后写入，然后 `reload()` 一次；第二次 `did-finish-load` 不再刷新。
+- **回灌存储与页面 cookie 只能在页面已在自身 origin 之后**：`dom-ready` → 导航 → `did-finish-load` 之后一次性写入，然后 `reload()` 一次；第二次 `did-finish-load` 不再刷新。写 cookie 时统一补 `; path=/`（`document.cookie` 读回来的串不带属性）。
 - **恢复期间禁止快照**：刚加载完的页面存储是空的，此时保存会把正在恢复的那份快照清空。所以用 `storageState`（`pending` → `restoring` → `done`）挡住保存，直到恢复落定。
-- **快照时机**：每次 `did-finish-load`、每 30 秒、窗口 `beforeunload`（`sendBeacon`，只带 partition，不带 storage）、以及插件 dispose 前最后一刻。
+- **快照时机**：每次 `did-finish-load`、每 30 秒、窗口 `beforeunload`（`sendBeacon`，只带 partition，不带 storage/cookie）、以及插件 dispose 前最后一刻。
 
 路由语义：
 
 | 路由 | 语义 |
 | --- | --- |
-| `POST /session/restore` `{ partition }` | 校验 partition 形状 → 读快照 → 把 cookie 写进该分区 → 返回 `{ ok, cookies, storage, savedAt }`。**没有快照也是 200**（`storage: null`）；拿不到 Electron 时返回 `ok:false` 而不是失败状态——页面必须照常加载 |
-| `POST /session/save` `{ partition, storage? }` | 读该分区 cookie + 传进来的 storage，原子写到快照。**不带 `storage` 时保留上一次的**（卸载时的 beacon 走的正是这条路） |
+| `POST /session/restore` `{ partition }` | 校验 partition 形状（不符 → 400）→ 读快照 → 尝试把 cookie 写进该分区 → 返回 `{ ok, error, cookies, storage, cookie, savedAt }`。**没有快照也是 200**（`storage: null`）；**拿不到 Electron 只让 `ok:false` + `error`，storage/cookie 照常返回**——页面必须照常加载 |
+| `POST /session/save` `{ partition, storage?, cookie? }` | 读该分区 cookie（能拿就拿）+ 传进来的 storage/cookie，原子写到快照，**永远返回 200**（`error` 里说明 cookie 为什么没拿到）。**不带 `storage`/`cookie` 时保留上一次的**——卸载时的 beacon 走的正是这条路 |
 
 安全边界（都要保持）：
 

@@ -232,7 +232,7 @@ test('a snapshot round-trips through disk and a missing file reads as null', () 
 
     // A corrupt file is not worth crashing the guest over.
     writeSnapshot(file, { cookies: 'not an array', storage: null })
-    assert.deepEqual(readSnapshot(file), { cookies: [], storage: [], savedAt: '' })
+    assert.deepEqual(readSnapshot(file), { cookies: [], storage: [], cookie: '', savedAt: '' })
   } finally {
     cleanup()
   }
@@ -325,19 +325,22 @@ test('saving snapshots the partition cookies and the page storage', async () => 
     const answer = await callRoute(routes, ROUTES.save, 'POST', {
       partition: 'dsh-sidebar-browser-11111111-2222-3333-4444-555555555555',
       storage: [['userToken', 'secret']],
+      cookie: 'ds_session=abc',
     })
 
     assert.equal(answer.status, 200)
-    assert.deepEqual(answer.payload, { ok: true, cookies: 1, storage: 1 })
+    assert.deepEqual(answer.payload, { ok: true, cookies: 1, storage: 1, cookie: true, error: '' })
     const snapshot = readSnapshot(file)
     assert.equal(snapshot.cookies[0].httpOnly, true)
     assert.deepEqual(snapshot.storage, [['userToken', 'secret']])
+    assert.equal(snapshot.cookie, 'ds_session=abc')
 
     // The unload beacon carries no storage and must not erase what was saved.
     const beacon = await callRoute(routes, ROUTES.save, 'POST', {
       partition: 'dsh-sidebar-browser-11111111-2222-3333-4444-555555555555',
     })
     assert.equal(beacon.payload.storage, 1)
+    assert.equal(beacon.payload.cookie, true)
     assert.deepEqual(readSnapshot(file).storage, [['userToken', 'secret']])
   } finally {
     setElectronLoader(null)
@@ -392,7 +395,7 @@ test('restoring without a snapshot is a no-op, not a failure', async () => {
     })
 
     assert.equal(answer.status, 200)
-    assert.deepEqual(answer.payload, { ok: true, cookies: 0, storage: null, savedAt: '' })
+    assert.deepEqual(answer.payload, { ok: true, cookies: 0, storage: null, cookie: '', savedAt: '' })
     assert.equal(cookies.written.length, 0)
     assert.equal(SESSION_FILE(), file)
   } finally {
@@ -417,13 +420,23 @@ test('a host without Electron reports why instead of failing the guest', async (
     assert.equal(restore.status, 200, 'the guest must still be allowed to load')
     assert.equal(restore.payload.ok, false)
     assert.match(restore.payload.error, /MODULE_NOT_FOUND/)
+    assert.deepEqual(restore.payload.storage, [['userToken', 'secret']], 'the guest still gets its storage back')
 
     const save = await callRoute(routes, ROUTES.save, 'POST', {
       partition: 'dsh-sidebar-browser-11111111-2222-3333-4444-555555555555',
       storage: [['userToken', 'secret']],
+      cookie: 'ds_session=abc',
     })
-    assert.equal(save.status, 502)
-    assert.equal(save.payload.ok, false)
+    // This is the case that made the login irrecoverable: a save used to fail
+    // outright when Electron was unreachable, so nothing was ever written.
+    assert.equal(save.status, 200)
+    assert.equal(save.payload.ok, true)
+    assert.equal(save.payload.cookies, 0)
+    assert.match(save.payload.error, /MODULE_NOT_FOUND/)
+    const written = readSnapshot(file)
+    assert.deepEqual(written.storage, [['userToken', 'secret']])
+    assert.equal(written.cookie, 'ds_session=abc')
+    assert.deepEqual(written.cookies, [])
   } finally {
     setElectronLoader(null)
     setSessionFile(null)
