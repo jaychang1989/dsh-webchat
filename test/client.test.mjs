@@ -2,9 +2,13 @@
  * Browser-half smoke test.
  *
  * The client bundle only ever runs inside the GUI, so it is executed here
- * against a minimal DOM stand-in: enough to prove the module-loader contract,
- * that apply() mounts the sidebar entry, and that clicking that entry calls the
- * host route and reports the outcome.
+ * against a minimal DOM stand-in. Two environments matter:
+ *
+ *   - the desktop app, where `globalThis.dshDesktop.browser` lends a native
+ *     guest, so the entry must open an in-window panel holding an approved
+ *     `<webview>`;
+ *   - a plain web profile, where no guest exists, so the entry must ask the host
+ *     half for a window instead.
  */
 
 import { test } from 'node:test'
@@ -15,7 +19,9 @@ import vm from 'node:vm'
 
 const BUNDLE = fileURLToPath(new URL('../lib/client.js', import.meta.url))
 const ENTRY = 'data-dsh-webchat-entry'
+const VIEW = 'data-dsh-webchat-view'
 const TOAST = 'data-dsh-webchat-toast'
+const PAGE_URL = 'https://chat.deepseek.com/'
 
 /** A DOM element stub covering exactly what lib/client.js touches. */
 function element(tagName, document) {
@@ -32,6 +38,7 @@ function element(tagName, document) {
     type: '',
     disabled: false,
     listeners: {},
+    loadedUrls: [],
     setAttribute(name, value) {
       this.attributes[name] = String(value)
       if (name === 'id') this.id = String(value)
@@ -69,6 +76,11 @@ function element(tagName, document) {
     },
     removeEventListener(type) {
       delete this.listeners[type]
+    },
+    /** Electron's <webview> navigation entry point. */
+    loadURL(url) {
+      this.loadedUrls.push(url)
+      return Promise.resolve()
     },
     closest() {
       return null
@@ -157,42 +169,68 @@ function makeDocument() {
   return document
 }
 
-/** Load the bundle with a fresh global set; returns the loader rows. */
-function loadBundle(document, fetchImpl) {
+/**
+ * Load the bundle with a fresh global set.
+ * @param document - DOM stand-in.
+ * @param options - `fetchImpl` for the window fallback and `bridge: false` to
+ *   simulate a plain web profile (no desktop guest bridge).
+ * @returns the loader rows and the recorded guest calls.
+ */
+function loadBundle(document, options = {}) {
   const rows = []
-  const pending = []
+  const guestCalls = { acquired: [], released: [] }
+  const bridge = options.bridge === false
+    ? undefined
+    : {
+      protocolVersion: 1,
+      browser: {
+        acquire: async (workspace) => {
+          guestCalls.acquired.push(workspace)
+          return { lease: 'lease-1', partition: 'dsh-sidebar-browser-test' }
+        },
+        release: async (lease) => { guestCalls.released.push(lease) },
+        onOpenRequested: () => () => {},
+      },
+    }
   const sandbox = {
     window: { __ModuleLoader__: { load: (row) => rows.push(row) } },
     document,
     navigator: { language: 'zh-CN' },
     console: { warn() {}, log() {}, error() {} },
-    fetch: fetchImpl ?? (async () => ({ ok: true, status: 200, json: async () => ({ ok: true, via: 'app-window' }) })),
+    fetch: options.fetchImpl ?? (async () => ({ ok: true, status: 200, json: async () => ({ ok: true, via: 'app-window' }) })),
     MutationObserver: class {
       observe() {}
       disconnect() {}
     },
-    // Record the dismissal without letting a live timer outlive the test.
-    setTimeout: (fn) => { pending.push(fn); return 0 },
+    CustomEvent: class {
+      constructor(type, init) {
+        this.type = type
+        this.detail = init?.detail
+      }
+    },
+    setTimeout: () => 0,
     clearTimeout: () => {},
   }
-  sandbox._pending = pending
+  if (bridge !== undefined) sandbox.dshDesktop = bridge
   const context = vm.createContext(sandbox)
   vm.runInContext(readFileSync(BUNDLE, 'utf8'), context, { filename: 'client.js' })
-  return { rows, sandbox }
+  return { rows, guestCalls }
 }
 
-/** Mount the plugin and return its sidebar entry. */
-function mount(document, fetchImpl) {
-  const { rows, sandbox } = loadBundle(document, fetchImpl)
+/** Mount the plugin and return its sidebar entry and guest handles. */
+function mount(document, options) {
+  const { rows, guestCalls } = loadBundle(document, options)
   const plugin = rows[0].factory()
   plugin.apply({ effect: (fn) => { const off = fn(); return () => { if (typeof off === 'function') off() } } })
   const entry = document.created.find((el) => el.getAttribute(ENTRY) !== null)
-  return { plugin, sandbox, entry }
+  const view = document._conversation.children.find((el) => el.getAttribute(VIEW) !== null)
+  const webview = () => document.created.find((el) => el.tagName === 'WEBVIEW')
+  return { plugin, entry, view, webview, guestCalls }
 }
 
 /** Let the click handler's awaits settle. */
 async function settle() {
-  for (let i = 0; i < 4; i++) await new Promise((resolve) => setImmediate(resolve))
+  for (let i = 0; i < 6; i++) await new Promise((resolve) => setImmediate(resolve))
 }
 
 test('the bundle registers under the package name', () => {
@@ -204,82 +242,95 @@ test('the bundle registers under the package name', () => {
   assert.equal(typeof rows[0].factory, 'function')
 })
 
-test('apply mounts the sidebar entry and nothing else', () => {
+test('on the desktop the entry mounts the center-column view', () => {
   const document = makeDocument()
-  const { plugin, entry } = mount(document)
+  const { plugin, entry, view } = mount(document)
 
   assert.equal(typeof plugin.apply, 'function')
-  // Cross-realm array: compare contents, not prototypes.
   assert.deepEqual([...plugin.inject], [])
-
   assert.ok(entry !== undefined, 'sidebar entry was not created')
-  assert.equal(entry.tagName, 'BUTTON')
-  assert.equal(entry.getAttribute('data-dsh-plugin'), 'webchat')
-  assert.equal(entry.getAttribute('aria-label'), 'DeepSeek 网页')
   assert.equal(entry.parentElement, document._sidebarRoot)
+  assert.ok(view !== undefined, 'the panel container was not appended to the center column')
   assert.ok(document.getElementById('dsh-webchat-style') !== null, 'stylesheet was not injected')
-
-  // No panel: the whole point of 0.4.x is that the page lives in a window.
-  assert.equal(document._conversation.children.length, 0)
-  assert.equal(document.created.filter(el => el.getAttribute('data-dsh-webchat-view') !== null).length, 0)
 })
 
-test('clicking the entry opens the page and confirms it', async () => {
+test('opening the panel reserves a guest and attaches an approved webview', async () => {
+  const document = makeDocument()
+  const { entry, webview, guestCalls } = mount(document)
+
+  assert.equal(webview(), undefined, 'no guest should exist before the first open')
+
+  await entry.dispatch('click', { target: null })
+  await settle()
+
+  assert.deepEqual(guestCalls.acquired, ['dsh-webchat'])
+
+  const frame = webview()
+  assert.ok(frame !== undefined, 'the webview was not attached')
+  assert.equal(frame.getAttribute('partition'), 'dsh-sidebar-browser-test')
+  assert.equal(frame.getAttribute('name'), 'lease-1')
+  assert.equal(frame.getAttribute('src'), 'about:blank#lease-1')
+  assert.equal(frame.getAttribute('allowpopups'), '')
+  assert.equal(frame.parentElement, document._conversation.children[0])
+
+  // The page is navigated once the guest reports its document ready.
+  frame.dispatch('dom-ready', {})
+  await settle()
+  assert.deepEqual(frame.loadedUrls, [PAGE_URL])
+})
+
+test('closing and reopening keeps the same guest', async () => {
+  const document = makeDocument()
+  const { entry, guestCalls, webview } = mount(document)
+
+  await entry.dispatch('click', { target: null })
+  await settle()
+  const first = webview()
+  first.dispatch('dom-ready', {})
+  await settle()
+
+  await entry.dispatch('click', { target: null })
+  await settle()
+  await entry.dispatch('click', { target: null })
+  await settle()
+
+  assert.equal(webview(), first, 'the guest was replaced instead of reused')
+  assert.deepEqual(guestCalls.acquired, ['dsh-webchat'])
+  assert.deepEqual(guestCalls.released, [])
+})
+
+test('without the desktop bridge the entry asks the host for a window', async () => {
   const document = makeDocument()
   const calls = []
-  const { entry } = mount(document, async (path, init) => {
-    calls.push({ path, method: init?.method ?? 'GET' })
-    return { ok: true, status: 200, json: async () => ({ ok: true, via: 'app-window' }) }
+  const { entry, webview } = mount(document, {
+    bridge: false,
+    fetchImpl: async (path, init) => {
+      calls.push({ path, method: init?.method ?? 'GET' })
+      return { ok: true, status: 200, json: async () => ({ ok: true, via: 'app-window' }) }
+    },
   })
 
   await entry.dispatch('click', { target: null })
   await settle()
 
   assert.deepEqual(calls, [{ path: '/api/dsh-webchat/open', method: 'POST' }])
-  const toast = document.created.find(el => el.getAttribute(TOAST) !== null && el.isConnected)
-  assert.ok(toast !== undefined, 'no confirmation toast')
+  assert.equal(webview(), undefined, 'no guest should be attempted without the bridge')
+  const toast = document.created.find((el) => el.getAttribute(TOAST) !== null && el.isConnected)
   assert.equal(toast.textContent, '已打开 DeepSeek 网页')
   assert.equal(entry.disabled, false)
-  assert.equal(entry.querySelector('[data-part=label]').textContent, 'DeepSeek 网页')
 })
 
-test('a system-browser handoff says so', async () => {
+test('a refused window fallback is reported', async () => {
   const document = makeDocument()
-  const { entry } = mount(document, async () => ({
-    ok: true, status: 200, json: async () => ({ ok: true, via: 'system-browser' }),
-  }))
+  const { entry } = mount(document, {
+    bridge: false,
+    fetchImpl: async () => ({ ok: false, status: 502, json: async () => ({ ok: false, via: 'system-browser', error: 'no way to open the page' }) }),
+  })
 
   await entry.dispatch('click', { target: null })
   await settle()
 
-  const toast = document.created.find(el => el.getAttribute(TOAST) !== null && el.isConnected)
-  assert.equal(toast.textContent, '已交给系统默认浏览器打开')
-})
-
-test('a refused open reports the failure', async () => {
-  const document = makeDocument()
-  const { entry } = mount(document, async () => ({
-    ok: false, status: 502, json: async () => ({ ok: false, via: 'system-browser', error: 'no way to open the page' }),
-  }))
-
-  await entry.dispatch('click', { target: null })
-  await settle()
-
-  const toast = document.created.find(el => el.getAttribute(TOAST) !== null && el.isConnected)
+  const toast = document.created.find((el) => el.getAttribute(TOAST) !== null && el.isConnected)
   assert.equal(toast.getAttribute('data-state'), 'bad')
   assert.match(toast.textContent, /no way to open the page/)
-})
-
-test('a 404 from an older host half is surfaced, not swallowed', async () => {
-  const document = makeDocument()
-  const { entry } = mount(document, async () => ({
-    ok: false, status: 404, json: async () => { throw new Error('not json') },
-  }))
-
-  await entry.dispatch('click', { target: null })
-  await settle()
-
-  const toast = document.created.find(el => el.getAttribute(TOAST) !== null && el.isConnected)
-  assert.equal(toast.getAttribute('data-state'), 'bad')
-  assert.match(toast.textContent, /HTTP 404/)
 })

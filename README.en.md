@@ -2,23 +2,24 @@
 
 [简体中文](./README.md) | **English**
 
-Opens the official [chat.deepseek.com](https://chat.deepseek.com) web app from [DeepSeek Harness](https://github.com/deepseek-ai/deepseek-harness) in one click.
+Opens the official [chat.deepseek.com](https://chat.deepseek.com) web app inside [DeepSeek Harness](https://github.com/deepseek-ai/deepseek-harness) — **click the sidebar entry and the page renders in the DSH window itself**, filling the center column like the Automation Tasks page does.
 
-**One sidebar entry. Click it, and the official page opens in a window.**
+No chat UI is reimplemented: model picker, deep think, smart search, history and attachments are all the official ones.
 
-That is the whole plugin. No chat UI, no transcript store, no agent tools — the official web app already is the client: model picker, deep think, smart search, history and attachments all live there.
+## How it can render inside the window
 
-## Why it opens a window instead of a pane
+The obvious routes really are closed:
 
-Three routes are closed, and these are measurements rather than preferences:
-
-| Route | Measured result |
+| Route | Result |
 | --- | --- |
-| `<iframe>` | `chat.deepseek.com` answers with `Content-Security-Policy: frame-ancestors 'none'`, so the browser refuses to render it in a frame |
-| Electron `<webview>` | both desktop windows run with `webviewTag: false`, and `will-attach-webview` is explicitly blocked |
-| The desktop app's own `WebContentsView` | reserved for platform pages (account/top-up) with navigation pinned to that origin; not reachable from a plugin |
+| `<iframe>` | the site answers `Content-Security-Policy: frame-ancestors 'none'`, so the browser refuses |
+| A plain `<webview>` | the desktop build disables the tag and blocks `will-attach-webview` |
 
-A real window is therefore the only faithful way to show the official page.
+But the desktop shell keeps a door open for **approved browser guests**: the renderer asks `globalThis.dshDesktop.browser` for a lease, and the shell approves exactly the `<webview>` whose `src` is `about:blank#<lease>` and whose `partition` matches — everything else stays blocked. This is the mechanism the built-in side-card browser uses; this plugin takes the same channel.
+
+So the page is **not an iframe** — it is a native guest owned by the host, which is why `frame-ancestors` does not apply to it. It also means the desktop app is what makes it possible.
+
+Where that bridge is absent (a plain `dsh web` profile) the plugin **falls back** to opening a window, so the entry always does something.
 
 ## Install
 
@@ -38,40 +39,31 @@ dsh plugin --profile desktop add github:jaychang1989/dsh-webchat
 
 ## Use
 
-1. Click the "DeepSeek 网页 / DeepSeek Web" entry in the sidebar.
-2. Sign in to DeepSeek once in the window it opens; the session is kept afterwards.
+1. Click the "DeepSeek 网页 / DeepSeek Web" entry — the page loads in the center column; there is no second click.
+2. Sign in to DeepSeek once; that holds for the rest of the run.
 
-A short toast in the corner reports the outcome.
-
-## How it opens the page
-
-Tried in order; the first that works wins, and the toast tells you which one it was:
-
-1. **App window** — a window created by the DSH desktop process itself (the desktop app is Electron). An already-open one is focused instead of duplicated.
-2. **Chromeless window** — Edge/Chrome in `--app=` mode with its own `--user-data-dir` (`~/.dsh/dsh-webchat/app-window`), so its login stays separate from your everyday browser. Used when (1) cannot reach Electron.
-3. **System browser** — the fallback, so a click always does something.
-
-None of the three needs configuration.
+Click again to collapse the panel. The guest stays mounted while the panel is closed, so reopening neither reloads the page nor drops the session. Clicking a session or workspace row in the sidebar hands the center column back to the conversation.
 
 ## Requirements
 
 - DeepSeek Harness **0.2.0-rc.1 or a newer 0.2.x**
 - Node.js >= 22
-- Strategy 2 needs Edge or Chrome installed; strategy 1 does not
+- The desktop app: only it provides the native guest bridge; plain `dsh web` uses the window fallback
 
 ## Known limitations
 
-- The DeepSeek web front end has its own rate limiting and sign-in flow; the plugin only hands the page over and does not mediate its requests.
-- A strategy-1 window is owned by the DSH process: if you close the DSH main window while it is still open, DSH will not quit (Electron's `window-all-closed`). Close that window too.
-- Reloading the plugin does not close a window that is already open — otherwise a settings change would close the conversation you are reading.
+- **Restarting the desktop app means signing in to DeepSeek again.** The host hands out a **process-lifetime** guest partition (a fresh random name per run, with no `persist:` prefix), so the session is not written to disk. That is the host's mechanism, not a choice this plugin makes.
+- The DeepSeek web front end has its own rate limiting and sign-in flow; the plugin only hosts it and does not mediate its requests.
+- Links the page opens are handled inside the guest; the plugin adds no navigation policy of its own.
 
 ## Troubleshooting
 
 | Symptom | Cause / fix |
 | --- | --- |
-| The toast says `HTTP 404` | The host half in memory is an older version (the host half loads once per process; the client half is re-fetched on every page load). **Restart the desktop app** |
-| The toast says it handed the page to the system browser | Strategies 1 and 2 were both unavailable — check whether the host refused a window, or whether Edge/Chrome is installed |
-| The entry is missing from the sidebar | Check that `@jaychang1989/dsh-webchat` is in the profile's `dsh.profile.bundles`, then restart the desktop app |
+| The entry is missing | Check that `@jaychang1989/dsh-webchat` is in the profile's `dsh.profile.bundles`, then restart the desktop app |
+| The center column says "载入失败：…" | The host refused the guest (the bridge threw). The text carries the host's reason |
+| Clicking the entry opened a browser window instead | This renderer had no `dshDesktop.browser` (a plain web profile, for instance), so the fallback ran |
+| It asks for a login again after a restart | See the limitations above — it is the host's partition behaviour |
 
 ## Development and tests
 
@@ -79,10 +71,10 @@ None of the three needs configuration.
 node --test
 ```
 
-Thirteen cases: the host's two routes and its window-strategy selection, plus the browser half executed against a DOM stand-in (it mounts the entry, posts to the right route on click, and reports success, handoff and failure honestly).
+Fourteen cases, and the browser half really executes against a DOM stand-in: in a desktop environment it checks that the entry mounts, that clicking reserves a lease, that the webview is built the way the host requires (`about:blank#<lease>`), that navigation happens on `dom-ready`, and that closing and reopening reuses the same guest; without a bridge it checks the window fallback and its reporting.
 
-There is no build step — `lib/index.js` and `lib/client.js` are the hand-written runtime, and the package has **zero runtime dependencies**. See [MAINTAINING.md](./MAINTAINING.md) (Chinese).
+There is no build step — `lib/index.js` and `lib/client.js` are the hand-written runtime, and the package has **zero runtime dependencies**. The guest mechanism is written up in [MAINTAINING.md](./MAINTAINING.md) (Chinese).
 
 ## Origin and license
 
-[Apache-2.0](./LICENSE). This package started as a fork of [xmuwenxiang/dsh-web-chat](https://github.com/xmuwenxiang/dsh-web-chat): it reuses that project's plugin scaffolding (the dual-half packaging, the `cordis.patch.yml` row, the `window.__ModuleLoader__.load` bundle form) and its approach to injecting a sidebar entry, while the current behaviour — the window strategies, the entry-as-action, the toast — is new. See [NOTICE](./NOTICE) for the copyright and license statements.
+[Apache-2.0](./LICENSE). This package started as a fork of [xmuwenxiang/dsh-web-chat](https://github.com/xmuwenxiang/dsh-web-chat): it reuses that project's plugin scaffolding (the dual-half packaging, the `cordis.patch.yml` row, the `window.__ModuleLoader__.load` bundle form) and its approach to injecting a sidebar entry, while the current behaviour — the in-window guest panel, the window fallback chain, the entry-as-action — was written here. See [NOTICE](./NOTICE) for the copyright and license statements.
