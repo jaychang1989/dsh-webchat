@@ -41,7 +41,7 @@ dsh plugin --profile desktop add github:jaychang1989/dsh-webchat
 
 ## Use
 
-1. Click the "DeepSeek 网页 / DeepSeek Web" entry — the page loads in the center column; there is no second click.
+1. Click the "chat DeepSeek" entry — the page loads in the center column; there is no second click.
 2. Sign in to DeepSeek once — the plugin keeps that login across restarts (see below).
 
 Click again to collapse the panel. Switching to another panel (Plugins, Automation Tasks, the task board, a session …) only hides the guest, never unmounts it, so coming back neither reloads the page nor drops the session.
@@ -75,7 +75,7 @@ The order: reserve the lease → restore first (cookies land before the first na
 
 | Symptom | Cause / fix |
 | --- | --- |
-| No "DeepSeek Web" row in the sidebar | Check that `@jaychang1989/dsh-webchat` is in the profile's `dsh.profile.bundles`, then restart the desktop app |
+| No "chat DeepSeek" row in the sidebar | Check that `@jaychang1989/dsh-webchat` is in the profile's `dsh.profile.bundles`, then restart the desktop app |
 | The center column says "载入失败：…" | The host refused the guest (the bridge threw). The text carries the host's reason |
 | The row opens a browser window instead of a panel | This renderer had no `dshDesktop.browser` (a plain web profile, for instance), so the fallback ran |
 | The row opens but the center column is blank | The panel fills the cell the shell allocates; in a very small window, or with the sidebar dragged extremely narrow, that cell can have no area |

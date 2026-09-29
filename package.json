@@ -1,6 +1,6 @@
 {
   "name": "@jaychang1989/dsh-webchat",
-  "version": "0.7.1",
+  "version": "0.7.2",
   "description": "Opens the official DeepSeek web app (chat.deepseek.com) inside DeepSeek Harness: one sidebar entry renders the real page in the center column, through the same native browser guest the built-in side-card browser uses. No chat UI, no agent tools, no runtime dependencies.",
   "keywords": [
     "dsh",

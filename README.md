@@ -41,7 +41,7 @@ dsh plugin --profile desktop add github:jaychang1989/dsh-webchat
 
 ## 使用
 
-1. 点侧边栏的「DeepSeek 网页」入口 —— 页面直接在中栏载入，不需要第二次点击；
+1. 点侧边栏的「chat DeepSeek」入口 —— 页面直接在中栏载入，不需要第二次点击；
 2. 在里面登录一次 DeepSeek，当前这次运行内一直有效。
 
 再点一次入口收起面板。切换去别的面板（插件、自动化任务、任务看板、会话……）时访客只是被隐藏、从不被卸载，所以切回来不会重新加载、也不会掉登录。
@@ -75,7 +75,7 @@ dsh plugin --profile desktop add github:jaychang1989/dsh-webchat
 
 | 现象 | 原因 / 处理 |
 | --- | --- |
-| 侧边栏没出现「DeepSeek 网页」这一行 | 确认 profile 的 `dsh.profile.bundles` 里有 `@jaychang1989/dsh-webchat`，然后重启桌面端 |
+| 侧边栏没出现「chat DeepSeek」这一行 | 确认 profile 的 `dsh.profile.bundles` 里有 `@jaychang1989/dsh-webchat`，然后重启桌面端 |
 | 中栏提示「载入失败：…」 | 宿主拒绝了访客（桥接返回异常）。文本里带着宿主给的原因 |
 | 这一行点了但中栏没有页面，反而弹出浏览器窗口 | 说明当前渲染进程拿不到 `dshDesktop.browser`（例如在纯 web 环境），插件走了降级路径 |
 | 这一行点了但中栏是空白 | 面板显示的空间是 shell 分配的那个格子；若窗口极小或侧栏被拖到极窄，格子可能没有面积 |
