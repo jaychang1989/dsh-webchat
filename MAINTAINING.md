@@ -53,22 +53,53 @@ guest.container.style.display = alive ? "block" : "none"
 
 矩形在 `ResizeObserver`（监听自己那个格子）与 `window resize` 时同步。面板的位置完全来自 slot 给它的空间，不去读别人的 DOM 或样式。插件被卸载时（`ctx.effect` 的清理）才移除容器并 `release(lease)`。
 
+## 登录态为什么由插件自己保存
+
+宿主给访客的分区是 `dsh-sidebar-browser-${randomUUID()}`：**不带 `persist:` 前缀**（Electron 里即内存分区），而且**每次运行都是新名字**。所以 cookie 与站点存储随进程一起消失——DSH 自带的侧栏浏览器也一样。插件无法申请别的分区：主进程在 `will-attach-webview` 里硬校验 `params.partition !== lease.partition → preventDefault()`。
+
+于是本插件自己接管这件事，分两步：
+
+1. **cookie 由宿主半区搬运。** 它跑在 **Electron 主进程**里，所以能 `session.fromPartition(partition).cookies` —— 这是渲染进程永远做不到的（`document.cookie` 看不到 HttpOnly，而登录态常常正在那儿）。
+2. **站点存储由浏览器半区搬运。** 用 `<webview>.executeJavaScript` 通用地读写 localStorage：不依赖任何具体键名，因此 DeepSeek 换键也不会失效。
+
+时序（顺序是有原因的，别随意调整）：
+
+- **回灌 cookie 必须在首次导航之前**：拿到租约 → `POST /session/restore`（宿主把快照里的 cookie 写进本次的分区）→ 才 `loadURL`。这样页面的第一个请求就带着登录态。
+- **回灌 localStorage 只能在页面已在自身 origin 之后**：`dom-ready` → 导航 → `did-finish-load` 之后写入，然后 `reload()` 一次；第二次 `did-finish-load` 不再刷新。
+- **恢复期间禁止快照**：刚加载完的页面存储是空的，此时保存会把正在恢复的那份快照清空。所以用 `storageState`（`pending` → `restoring` → `done`）挡住保存，直到恢复落定。
+- **快照时机**：每次 `did-finish-load`、每 30 秒、窗口 `beforeunload`（`sendBeacon`，只带 partition，不带 storage）、以及插件 dispose 前最后一刻。
+
+路由语义：
+
+| 路由 | 语义 |
+| --- | --- |
+| `POST /session/restore` `{ partition }` | 校验 partition 形状 → 读快照 → 把 cookie 写进该分区 → 返回 `{ ok, cookies, storage, savedAt }`。**没有快照也是 200**（`storage: null`）；拿不到 Electron 时返回 `ok:false` 而不是失败状态——页面必须照常加载 |
+| `POST /session/save` `{ partition, storage? }` | 读该分区 cookie + 传进来的 storage，原子写到快照。**不带 `storage` 时保留上一次的**（卸载时的 beacon 走的正是这条路） |
+
+安全边界（都要保持）：
+
+- partition 必须匹配 `/^dsh-sidebar-browser-[0-9a-f-]{8,}$/`，插件绝不触碰别的 session；
+- 快照只写在 `~/.dsh/dsh-webchat/session.json`，以 `0o600` 先写临时文件再 `rename`（崩溃不会截断）；
+- 内容是**明文凭据**：`GET /state` 只报**数量**，绝不回显 cookie 值——那个端点没有鉴权。
+
+两个测试缝只在测试里使用：`setSessionFile(path)` 与 `setElectronLoader(fn)`（生产路径不设置，走真实实现）。
+
 ## 目录与"无构建"政策
 
 **没有构建步骤。** React 取自浏览器的模块表（`factory(require)` 里的 `require('react')`），其余是手写 DOM，因此本包**零运行时依赖**。
 
 ```
-lib/index.js       宿主半区 —— 两条路由 + 窗口降级策略（纯 web 环境才用得上）
-lib/client.js      浏览器半区 —— 两个槽位注册 + 常驻访客
+lib/index.js       宿主半区 —— 四条路由（诊断 / 窗口降级 / 登录态回灌与快照）+ 窗口降级策略
+lib/client.js      浏览器半区 —— 两个槽位注册 + 常驻访客 + 登录态搬运
 cordis.patch.yml   profile 行
 test/*.test.mjs    node --test
 ```
 
 ## 宿主半区
 
-`inject: ['webServer']`，两条 exact 路由：`GET /api/dsh-webchat/state`（诊断：`{ ok, url, appWindowOpen, last, attempts }`）与 `POST /api/dsh-webchat/open`（`{ ok, via, error, at }`，都没打开时 502）。
+`inject: ['webServer']`，四条 exact 路由：`GET /api/dsh-webchat/state`（诊断：`{ ok, url, appWindowOpen, last, attempts, session }`）、`POST /api/dsh-webchat/open`（窗口降级）、`POST /api/dsh-webchat/session/restore` 与 `POST /api/dsh-webchat/session/save`（登录态，语义见上）。
 
-`openPage(strategies)` 依次走 `OPEN_STRATEGIES` 并记录**整条链路**（`attempts`），所以一次点击就能看出每条策略为什么失败。策略：`app-window`（先 `await import('electron')`，失败再 `createRequire(...)('electron')`，然后 `new BrowserWindow`）、`app-window-shell`（`msedge.exe`/`chrome.exe` + `--app=`）、`system-browser`。
+`openPage(strategies)` 依次走 `OPEN_STRATEGIES` 并记录**整条链路**（`attempts`），所以一次点击就能看出每条策略为什么失败。策略：`app-window`（先 `await import('electron')`，失败再 `createRequire(...)('electron')`，然后 `new BrowserWindow`）、`app-window-shell`（`msedge.exe`/`chrome.exe` + `--app=`）、`system-browser`。`electronApi()` 只要拿到 `BrowserWindow` **或** `session` 就算可用，两条调用方各取所需。
 
 窗口句柄挂在 `globalThis[Symbol.for('@jaychang1989/dsh-webchat.window')]`：否则一次热重载会交给新模块一个 `null`，把已开的窗口变成孤儿。dispose 时**不关窗口**。
 
@@ -80,12 +111,14 @@ test/*.test.mjs    node --test
 node --test
 ```
 
-19 个用例。宿主半区用假 context 与假 request/response 驱动（路由、方法守卫、策略选择与失败链路）；浏览器半区用一层薄的 React 测试替身（`createElement`/`useRef`/`useEffect`）+ DOM 桩**真实执行**：槽位注册契约（同一个 id、order、label thunk、按 `size` 出图标）、租约与 webview 属性、`dom-ready` 时先改 UA 再导航且顺序正确、**卸载只隐藏不摘除、重挂复用同一访客、只申请一次租约**、插件卸载释放租约，以及无桥接时的降级与失败提示。
+34 个用例。宿主半区用假 context、假 request/response 与**可注入的 Electron/cookie 替身**驱动：快照落盘往返、cookie 捕获与回灌（含 HttpOnly、拒绝一个不合法 cookie 不影响其余、缺 name/domain 的条目跳过）、两条会话路由的方法守卫与分区校验、"没有快照"是成功而非失败、拿不到 Electron 时如实报错且不影响页面。浏览器半区用一层薄的 React 测试替身（`createElement`/`useRef`/`useEffect`）+ DOM 桩**真实执行**：槽位注册契约（同一个 id、order、label thunk、按 `size` 出图标）、租约与 webview 属性、`dom-ready` 时先改 UA 再导航且顺序正确、**卸载只隐藏不摘除、重挂复用同一访客、只申请一次租约**、会话恢复只写一次存储并只刷新一次（且恢复期间不快照）、使用中/卸载前的快照与定时器清理，以及无桥接时的降级与失败提示。
 
 ## 无法从 app 外部验证的部分
 
 - **宿主是否真的批准访客**只能在运行中的桌面端验证：测试能证明插件按约定构造了 webview，但 `will-attach-webview` 的放行发生在主进程。
 - **槽位注册是否被接受**（例如 order 的落点、图标尺寸）同样要看真实渲染结果；测试只覆盖插件这一侧的参数。
+- **宿主半区能否真的拿到 Electron**（决定登录态能否保存）也只能在真实进程里验证：`GET /api/dsh-webchat/state` 的 `session.electron` 就是它的自检结果；测试用的是注入替身。
+- 登录态能否真正恢复，最终取决于 DeepSeek 把会话放在哪里：cookie（本插件能完整搬运，含 HttpOnly）与 localStorage（通用搬运）。若它改用其它存储，需要重新登录一次。
 - 页面是否还会弹「使用环境异常」，取决于站点的检查逻辑，同样以真实页面为准。
 
 ## 来源

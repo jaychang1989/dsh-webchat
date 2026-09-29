@@ -42,7 +42,7 @@ dsh plugin --profile desktop add github:jaychang1989/dsh-webchat
 ## Use
 
 1. Click the "DeepSeek 网页 / DeepSeek Web" entry — the page loads in the center column; there is no second click.
-2. Sign in to DeepSeek once; that holds for the rest of the run.
+2. Sign in to DeepSeek once — the plugin keeps that login across restarts (see below).
 
 Click again to collapse the panel. Switching to another panel (Plugins, Automation Tasks, the task board, a session …) only hides the guest, never unmounts it, so coming back neither reloads the page nor drops the session.
 
@@ -52,10 +52,18 @@ Click again to collapse the panel. Switching to another panel (Plugins, Automati
 - Node.js >= 22
 - The desktop app: only it provides the native guest bridge; plain `dsh web` uses the window fallback
 
+## Staying signed in
+
+The host hands browser guests a **process-lifetime** partition (a fresh random name per run, with no `persist:` prefix), so cookies and site storage would die with the app — DSH's own side-card browser behaves the same way. This plugin takes that over: its host half runs inside the **Electron main process**, which is the only place a partition's cookies can be read (**HttpOnly ones included**; a renderer can never see them). It snapshots the cookies and the page's localStorage while you use the page, and puts them back **before** the page loads on the next run.
+
+- Location: `%USERPROFILE%\.dsh\dsh-webchat\session.json`
+- **Deleting that file logs the plugin's guest out** — it keeps nothing else behind.
+- The file holds live session credentials in **plain text**. It sits in your own profile directory (user-private by default), but it is not as protected as a browser's encrypted cookie store.
+- If DeepSeek changes how it stores the session you may have to sign in once more; the snapshot is then taken again automatically.
+
 ## Known limitations
 
-- **Restarting the desktop app means signing in to DeepSeek again.** The host hands out a **process-lifetime** guest partition (a fresh random name per run, with no `persist:` prefix), so the session is not written to disk. That is the host's mechanism, not a choice this plugin makes.
-- The DeepSeek web front end has its own rate limiting and sign-in flow; the plugin only hosts it and does not mediate its requests.
+- The DeepSeek web front end has its own rate limiting and sign-in flow; the plugin only hosts it and keeps the session, and does not mediate its requests.
 - Links the page opens are handled inside the guest; the plugin adds no navigation policy of its own.
 
 ## Troubleshooting
@@ -66,7 +74,8 @@ Click again to collapse the panel. Switching to another panel (Plugins, Automati
 | The center column says "载入失败：…" | The host refused the guest (the bridge threw). The text carries the host's reason |
 | The row opens a browser window instead of a panel | This renderer had no `dshDesktop.browser` (a plain web profile, for instance), so the fallback ran |
 | The row opens but the center column is blank | The panel fills the cell the shell allocates; in a very small window, or with the sidebar dragged extremely narrow, that cell can have no area |
-| It asks for a login again after a restart | See the limitations above — it is the host's partition behaviour |
+| It asks for a login again after a restart | Check `session` in `GET /api/dsh-webchat/state`: an `electron` value other than `ready` means the host half cannot reach Electron (so nothing can be saved), and `saved: null` means no snapshot exists yet. Use the page for a moment and look again ~30s later |
+| You want to sign out for good | Delete `%USERPROFILE%\.dsh\dsh-webchat\session.json` |
 | The page shows "Abnormal usage environment" | DeepSeek's front end checks `navigator.userAgent` for the string `electron` — which the desktop default carries — and then recommends its official product. Since 0.5.2 the guest presents a plain Chrome user agent and the dialog no longer appears |
 
 ## Development and tests
@@ -75,7 +84,7 @@ Click again to collapse the panel. Switching to another panel (Plugins, Automati
 node --test
 ```
 
-Nineteen cases. The host half is driven through a fake context and fake request/response objects; the browser half really executes against a thin React test double plus a DOM stand-in: it checks that the plugin registers its nav row and its page under the slot contract (one shared id), that the label follows the language, that the icon honours the size the shell asks for, and the whole guest lifecycle — reserving a lease, building the webview the way the host requires (`about:blank#<lease>`), setting the user agent before navigating on `dom-ready`, **hiding the guest without detaching it when the panel unmounts and reusing it on remount**, and releasing the lease on plugin disposal; without a bridge it checks the window fallback and its reporting.
+Thirty-four cases. The host half is driven through a fake context, fake request/response objects and injectable Electron/cookie stand-ins: the snapshot round-trip through disk, cookie capture and restore (HttpOnly included, one refused cookie not aborting the rest), the session routes' method guards and partition validation, and a host without Electron reporting why without hurting the page. The browser half really executes against a thin React test double plus a DOM stand-in: the slot contract (one shared id, order, the label thunk, the icon honouring the requested size), the lease and the `about:blank#<lease>` webview, the user agent landing before navigation, **hiding the guest without detaching it on unmount and reusing it on remount**, the login restore writing storage once and reloading once, snapshots while in use and on disposal, and the window fallback.
 
 There is no build step — `lib/index.js` and `lib/client.js` are the hand-written runtime, and the package has **zero runtime dependencies**. The guest mechanism is written up in [MAINTAINING.md](./MAINTAINING.md) (Chinese).
 

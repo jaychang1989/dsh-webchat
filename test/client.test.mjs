@@ -40,6 +40,9 @@ function element(tagName, document) {
     listeners: {},
     loadedUrls: [],
     userAgents: [],
+    scripts: [],
+    reloads: 0,
+    reply: '[]',
     calls: [],
     rect: { left: 280, top: 48, width: 900, height: 700 },
     setAttribute(name, value) {
@@ -72,10 +75,10 @@ function element(tagName, document) {
       this.isConnected = false
     },
     addEventListener(type, handler) {
-      this.listeners[type] = handler
+      this.listeners[type] = (this.listeners[type] ?? []).concat(handler)
     },
-    removeEventListener(type) {
-      delete this.listeners[type]
+    removeEventListener(type, handler) {
+      this.listeners[type] = (this.listeners[type] ?? []).filter((entry) => entry !== handler)
     },
     /** Electron's <webview> navigation entry point. */
     loadURL(url) {
@@ -88,12 +91,21 @@ function element(tagName, document) {
       this.calls.push('setUserAgent')
       this.userAgents.push(userAgent)
     },
+    /** Electron's <webview> script evaluation, used for site storage. */
+    executeJavaScript(code) {
+      this.scripts.push(code)
+      return Promise.resolve(this.reply ?? '[]')
+    },
+    reload() {
+      this.reloads += 1
+      return Promise.resolve()
+    },
     getBoundingClientRect() {
       return this.rect
     },
     dispatch(type, event) {
-      const handler = this.listeners[type]
-      return handler === undefined ? undefined : handler(event)
+      for (const handler of this.listeners[type] ?? []) handler(event)
+      return undefined
     },
     get firstElementChild() {
       return this.children[0] ?? null
@@ -194,13 +206,43 @@ function makeReact() {
 function loadBundle(document, options = {}) {
   const rows = []
   const guestCalls = { acquired: [], released: [] }
+  const requests = []
+  const beacons = []
+  const intervals = new Map()
   const fakeReact = makeReact()
+  let nextTimer = 1
+  const defaultFetch = async (path, init) => {
+    requests.push({ path: String(path), body: init?.body === undefined ? undefined : JSON.parse(String(init.body)) })
+    if (String(path).includes('/session/restore')) {
+      return { ok: true, status: 200, json: async () => ({ ok: true, cookies: 0, storage: options.restoreStorage ?? null, savedAt: '' }) }
+    }
+    if (String(path).includes('/session/save')) {
+      return { ok: true, status: 200, json: async () => ({ ok: true, cookies: 0, storage: 0 }) }
+    }
+    return { ok: true, status: 200, json: async () => ({ ok: true, via: 'app-window' }) }
+  }
   const sandbox = {
     window: { __ModuleLoader__: { load: (row) => rows.push(row) }, ...makeWindow() },
     document,
-    navigator: { language: 'zh-CN', userAgent: options.userAgent },
+    navigator: {
+      language: 'zh-CN',
+      userAgent: options.userAgent,
+      sendBeacon(url, data) {
+        beacons.push({ url: String(url), data: JSON.parse(String(data)) })
+        return true
+      },
+    },
     console: { warn() {}, log() {}, error() {} },
-    fetch: options.fetchImpl ?? (async () => ({ ok: true, status: 200, json: async () => ({ ok: true, via: 'app-window' }) })),
+    fetch: options.fetchImpl ?? defaultFetch,
+    setInterval(fn, ms) {
+      const id = nextTimer
+      nextTimer += 1
+      intervals.set(id, { fn, ms })
+      return id
+    },
+    clearInterval(id) {
+      intervals.delete(id)
+    },
     ResizeObserver: class {
       constructor(callback) {
         this.callback = callback
@@ -227,12 +269,12 @@ function loadBundle(document, options = {}) {
   if (bridge !== undefined) sandbox.dshDesktop = { protocolVersion: 1, browser: bridge }
   const context = vm.createContext(sandbox)
   vm.runInContext(readFileSync(BUNDLE, 'utf8'), context, { filename: 'client.js' })
-  return { rows, guestCalls, sandbox, react: fakeReact }
+  return { rows, guestCalls, sandbox, react: fakeReact, requests, beacons, intervals }
 }
 
 /** Load the plugin and capture the slot registrations it installs. */
 function loadPlugin(document, options) {
-  const { rows, guestCalls, sandbox, react } = loadBundle(document, options)
+  const { rows, guestCalls, sandbox, react, requests, beacons, intervals } = loadBundle(document, options)
   const plugin = rows[0].factory(sandbox.require)
   const registrations = []
   const effects = []
@@ -252,7 +294,7 @@ function loadPlugin(document, options) {
       return () => {}
     },
   }
-  return { plugin, ctx, registrations, effects, guestCalls, sandbox, react }
+  return { plugin, ctx, registrations, effects, guestCalls, sandbox, react, requests, beacons, intervals }
 }
 
 /** Let the guest promise chain settle. */
@@ -428,6 +470,133 @@ test('a renderer that reports no user agent adds no override', async () => {
   await settle()
   assert.deepEqual(frame.userAgents, [])
   assert.deepEqual(frame.calls, ['loadURL'])
+})
+
+test('the guest asks the host to put the saved session back before it navigates', async () => {
+  const document = makeDocument()
+  const { plugin, ctx, registrations, requests, react } = loadPlugin(document)
+  plugin.apply(ctx)
+
+  const rendered = react.render(registrations[1].component)
+  rendered.mount(element('div', document))
+  await settle()
+
+  assert.equal(requests[0].path, '/api/dsh-webchat/session/restore')
+  assert.equal(requests[0].body.partition, 'dsh-sidebar-browser-test')
+  assert.equal(document.created.find((el) => el.tagName === 'WEBVIEW') !== undefined, true)
+})
+
+test('saved site storage is written back exactly once, then the page reloads', async () => {
+  const document = makeDocument()
+  const { plugin, ctx, registrations, react } = loadPlugin(document, {
+    restoreStorage: [['userToken', 'secret'], ['userInfo', '{}']],
+  })
+  plugin.apply(ctx)
+
+  const rendered = react.render(registrations[1].component)
+  rendered.mount(element('div', document))
+  await settle()
+
+  const frame = document.created.find((el) => el.tagName === 'WEBVIEW')
+  frame.dispatch('dom-ready', {})
+  await settle()
+  assert.equal(frame.reloads, 0, 'nothing is reloaded before the first real load finishes')
+
+  frame.dispatch('did-finish-load', {})
+  await settle()
+  assert.equal(frame.reloads, 1, 'the page must be reloaded once with the storage in place')
+  assert.match(frame.scripts[0], /setItem/)
+  assert.match(frame.scripts[0], /userToken/)
+  assert.match(frame.scripts[0], /secret/)
+
+  frame.dispatch('did-finish-load', {})
+  await settle()
+  assert.equal(frame.reloads, 1, 'the restore must not loop')
+})
+
+test('a fresh run without a snapshot never reloads the page', async () => {
+  const document = makeDocument()
+  const { plugin, ctx, registrations, react } = loadPlugin(document)
+  plugin.apply(ctx)
+
+  const rendered = react.render(registrations[1].component)
+  rendered.mount(element('div', document))
+  await settle()
+
+  const frame = document.created.find((el) => el.tagName === 'WEBVIEW')
+  frame.dispatch('dom-ready', {})
+  await settle()
+  frame.dispatch('did-finish-load', {})
+  await settle()
+
+  assert.equal(frame.reloads, 0)
+  assert.equal(frame.scripts.length, 1, 'only the storage read for the snapshot runs')
+})
+
+test('the session is snapshotted as the page is used', async () => {
+  const document = makeDocument()
+  const { plugin, ctx, registrations, requests, intervals, react } = loadPlugin(document)
+  plugin.apply(ctx)
+
+  const rendered = react.render(registrations[1].component)
+  rendered.mount(element('div', document))
+  await settle()
+
+  const frame = document.created.find((el) => el.tagName === 'WEBVIEW')
+  frame.reply = JSON.stringify([['userToken', 'secret']])
+  frame.dispatch('dom-ready', {})
+  await settle()
+  frame.dispatch('did-finish-load', {})
+  await settle()
+
+  const saves = requests.filter((entry) => entry.path === '/api/dsh-webchat/session/save')
+  assert.equal(saves.length, 1, 'a finished load snapshots the session')
+  assert.equal(saves[0].body.partition, 'dsh-sidebar-browser-test')
+  assert.deepEqual(saves[0].body.storage, [['userToken', 'secret']])
+
+  assert.equal(intervals.size, 1, 'the guest keeps a periodic snapshot running')
+  assert.equal([...intervals.values()][0].ms, 30000)
+  await [...intervals.values()][0].fn()
+  await settle()
+  assert.equal(requests.filter((entry) => entry.path.endsWith('/session/save')).length, 2)
+})
+
+test('unload snapshots the session without shipping storage', async () => {
+  const document = makeDocument()
+  const { plugin, ctx, registrations, beacons, sandbox, react } = loadPlugin(document)
+  plugin.apply(ctx)
+
+  const rendered = react.render(registrations[1].component)
+  rendered.mount(element('div', document))
+  await settle()
+
+  const handlers = sandbox.window.listeners.beforeunload ?? []
+  assert.equal(handlers.length, 1, 'the unload beacon must be installed')
+  handlers[0]({})
+
+  assert.equal(beacons.length, 1)
+  assert.equal(beacons[0].url, '/api/dsh-webchat/session/save')
+  assert.deepEqual(beacons[0].data, { partition: 'dsh-sidebar-browser-test' })
+})
+
+test('plugin disposal snapshots once more and stops the timer', async () => {
+  const document = makeDocument()
+  const { plugin, ctx, registrations, effects, intervals, requests, sandbox, react } = loadPlugin(document)
+  plugin.apply(ctx)
+
+  const rendered = react.render(registrations[1].component)
+  rendered.mount(element('div', document))
+  await settle()
+  const frame = document.created.find((el) => el.tagName === 'WEBVIEW')
+  frame.reply = JSON.stringify([['userToken', 'secret']])
+
+  const cleanups = effects.map((fn) => fn()).filter((fn) => typeof fn === 'function')
+  cleanups.forEach((fn) => fn())
+  await settle()
+
+  assert.equal(intervals.size, 0, 'the periodic snapshot must stop with the plugin')
+  assert.equal((sandbox.window.listeners.beforeunload ?? []).length, 0)
+  assert.ok(requests.some((entry) => entry.path.endsWith('/session/save')), 'disposal must save before releasing')
 })
 
 test('without the desktop bridge the panel offers the window fallback', async () => {

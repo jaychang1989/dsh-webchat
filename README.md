@@ -52,10 +52,18 @@ dsh plugin --profile desktop add github:jaychang1989/dsh-webchat
 - Node.js >= 22
 - 桌面端（DSH Desktop）：只有它提供原生访客桥接；纯 `dsh web` 会走窗口降级
 
+## 登录状态
+
+桌面端给浏览器访客的分区是**进程内**的（每次运行随机命名、不带 `persist:`），所以 cookie 和站点存储本来会随退出一起消失——DSH 自带的侧栏浏览器也是这样。本插件把这个接管了：宿主半区运行在 **Electron 主进程里**，因此能读到该分区的 cookie（**含 HttpOnly**，渲染进程永远看不到），它会在你使用过程中把 cookie 与页面的 localStorage 快照下来，下次启动时**先回灌、再加载页面**。
+
+- 文件位置：`%USERPROFILE%\.dsh\dsh-webchat\session.json`
+- **删掉这个文件就等于退出登录**（本插件不会再有别的残留）。
+- 文件里是**明文**会话凭据。它在你自己的用户目录下（默认只有你的账户可读），但确实不如浏览器那种加密 cookie 库。
+- 若 DeepSeek 更换登录态的存储方式，可能要重新登录一次——之后会自动重新快照。
+
 ## 已知限制
 
-- **重启桌面端后需要重新登录 DeepSeek。** 宿主给访客分配的是**进程内**分区（每次运行随机命名、不带 `persist:`），登录态不落盘。这是宿主的机制，插件无法改变。
-- 官方网页端有自己的风控与登录流程，插件只负责把它承载起来，不介入其请求。
+- 官方网页端有自己的风控与登录流程，插件只负责把它承载起来并保留登录态，不介入其请求。
 - 页面里指向外部的链接在访客内处理；插件不追加自己的导航策略。
 
 ## 排查
@@ -66,7 +74,8 @@ dsh plugin --profile desktop add github:jaychang1989/dsh-webchat
 | 中栏提示「载入失败：…」 | 宿主拒绝了访客（桥接返回异常）。文本里带着宿主给的原因 |
 | 这一行点了但中栏没有页面，反而弹出浏览器窗口 | 说明当前渲染进程拿不到 `dshDesktop.browser`（例如在纯 web 环境），插件走了降级路径 |
 | 这一行点了但中栏是空白 | 面板显示的空间是 shell 分配的那个格子；若窗口极小或侧栏被拖到极窄，格子可能没有面积 |
-| 重启后要求重新登录 | 见上面的「已知限制」，属于宿主分区机制 |
+| 重启后要求重新登录 | 先看 `GET /api/dsh-webchat/state` 的 `session`：`electron` 不是 `ready` 说明宿主半区拿不到 Electron（登录态无法保存），`saved` 为 `null` 说明还没产生过快照。正常情况下用一次、等 30 秒再看，文件就会出现 |
+| 想彻底退出登录 | 删掉 `%USERPROFILE%\.dsh\dsh-webchat\session.json` |
 | 页面弹出「使用环境异常」 | DeepSeek 前端会检查 `navigator.userAgent` 里是否含 `electron`（桌面端默认 UA 就含），命中就提示"建议使用官方产品"。0.5.2 起访客改用普通 Chrome UA，不再触发 |
 
 ## 开发与测试
@@ -75,9 +84,9 @@ dsh plugin --profile desktop add github:jaychang1989/dsh-webchat
 node --test
 ```
 
-19 个用例。宿主半区用假 context 与假 request/response 驱动；浏览器半区用一层薄的 React 测试替身 + DOM 桩**真实执行**：验证它按槽位契约注册导航行与页面（同一个 id）、标签随语言变化、图标遵循 shell 要求的尺寸，以及访客生命周期——申请租约、按宿主约定生成 `about:blank#<lease>` 的 webview、`dom-ready` 后先改 UA 再导航、**卸载只隐藏不卸载访客、重挂复用同一个**、插件卸载时释放租约；无桥接环境下验证降级为请求宿主开窗并如实反馈。
+34 个用例。宿主半区用假 context、假 request/response 与可注入的 Electron/cookie 替身驱动：快照落盘往返、cookie 捕获与回灌（含 `HttpOnly`、拒绝一个不合法 cookie 不影响其余）、两条会话路由的方法守卫与分区校验、无 Electron 时如实报错而不影响页面加载。浏览器半区用一层薄的 React 测试替身 + DOM 桩**真实执行**：槽位注册契约（同一个 id、order、label thunk、按 size 出图标）、租约与 `about:blank#<lease>` 的 webview、`dom-ready` 后先改 UA 再导航、**卸载只隐藏不摘除 / 重挂复用同一访客 / 只申请一次租约**、登录态恢复只回灌一次并只刷新一次、使用中与卸载时的快照、无桥接时的降级。
 
-没有构建步骤——`lib/index.js` 与 `lib/client.js` 就是手写的运行时代码（React 取自浏览器的模块表），包内**零运行时依赖**。访客机制与槽位契约见 [MAINTAINING.md](./MAINTAINING.md)。
+没有构建步骤——`lib/index.js` 与 `lib/client.js` 就是手写的运行时代码（React 取自浏览器的模块表），包内**零运行时依赖**。访客机制、槽位契约与登录态保存见 [MAINTAINING.md](./MAINTAINING.md)。
 
 ## 来源与许可
 
