@@ -6,73 +6,73 @@
 
 ## 页面为什么能在窗口内显示
 
-两条常规路径确实是死的：
+两条常规路径确实是死的：`chat.deepseek.com` 返回 `frame-ancestors 'none'`（iframe 被拒），桌面端也默认关闭 `<webview>` 标签并拦截 `will-attach-webview`。
 
-- `chat.deepseek.com` 返回 `Content-Security-Policy: frame-ancestors 'none'`，iframe 被浏览器拒绝；
-- 桌面端默认关闭 `<webview>` 标签，`will-attach-webview` 一律拦截。
+**但桌面端给"受信任的浏览器访客"留了通道**（DSH 自带的侧栏浏览器用的是同一套）：
 
-**但桌面端给"受信任的浏览器访客"留了通道**，也就是本插件走的路（DSH 自带的侧栏浏览器用的是同一套）：
+- 渲染进程调用 `globalThis.dshDesktop.browser.acquire(identity)`（IPC `dsh-desktop:browser-acquire`），宿主在 `DesktopBrowserGuests` 里为该 identity 分配一个**进程内**分区并返回 `{ lease, partition }`；
+- 渲染进程创建 `<webview>`，`src="about:blank#<lease>"`、`partition=<partition>`、`name=<lease>`，挂进 DOM；
+- 宿主在 `will-attach-webview` 里只放行这一个元素（lease 属于当前窗口、partition 匹配、且未被占用过），并替它写死一组安全 webPreferences（`nodeIntegration: false`、`contextIsolation: true`、`sandbox: true`、`webviewTag: false` …），其余一律 `preventDefault()`；
+- 附加成功后宿主经 `did-attach-webview` 接管输入，客户端再导航。
 
-- 渲染进程调用 `globalThis.dshDesktop.browser.acquire(workspace)`（IPC `dsh-desktop:browser-acquire`），宿主在 `DesktopBrowserGuests` 里为这个 workspace 分配一个**进程内**分区并返回 `{ lease, partition }`；
-- 渲染进程创建 `<webview>`，`src="about:blank#<lease>"`、`partition=<partition>`、`name=<lease>`，然后挂进 DOM；
-- 宿主在 `will-attach-webview` 里只放行 `src` 里带的 lease 属于当前窗口、`partition` 匹配、且尚未被占用过的那一个元素，并替它写死一组安全 webPreferences（`nodeIntegration: false`、`contextIsolation: true`、`sandbox: true`、`webviewTag: false` …），其余一律 `preventDefault()`；
-- 附加成功后宿主通过 `did-attach-webview` 接管输入，客户端再 `element.loadURL(url)` 导航。
+这是宿主的**原生访客**，不是 iframe，所以 `frame-ancestors` 约束不到它；也因此它只能存在于桌面端。宿主没有给插件提供别的"显示网页"公开 API，本插件用的是与内置浏览器相同的那条 IPC 通道，所以**升级 DSH 时要重新核对 `DesktopBrowserGuests` 的约定**（`lib/preload-app.cjs`、`lib/main.js`）。
 
-关键点：这是宿主的**原生访客**，不是 iframe，所以 `frame-ancestors` 约束不到它。也因此它只能存在于桌面端。
+### 访客不暴露 Electron
 
-宿主没有给插件提供任何"在面板里显示网页"的公开 API；本插件使用的是与内置浏览器相同的那条 IPC 通道，因此**升级 DSH 时要重新核对 `DesktopBrowserGuests` 的约定**（预加载脚本 `lib/preload-app.cjs`、主进程 `lib/main.js`）。若某天该通道收紧或改名，客户端会拿不到租约、面板显示「载入失败」，而入口本身的降级路径仍然可用。
+`chat.deepseek.com` 的前端会检查 `navigator.userAgent` 里是否含 `electron`，命中就弹「使用环境异常」，而"不再提示"记在访客分区的存储里——分区是进程内的，所以每次重启都会再弹。因此访客改用普通 Chrome UA（Chrome 大版本取自本渲染进程自己的 UA，保持真实）：既写在 `<webview useragent>` 属性上，也在 `dom-ready` 后、首次导航前用 `setUserAgent()` 再落一次（因为宿主会重写 guest 的 preferences）。
+
+## 槽位契约
+
+导航行与页面**都是 shell 的槽位**，插件只提供内容：
+
+```js
+ctx.slots.inject("sidebar.panellist", () => ctx.slots.register({
+  name: "sidebar.panellist", id: "webchat", order: -1, label: () => copy().label,
+}, WebchatIcon))                       // 只画图标
+ctx.slots.inject("main", () => ctx.slots.register({
+  name: "main", key: "webchat",
+}, WebchatPanel))                      // 页面本体
+```
+
+- `sidebar.panellist`（list、root scope）：`id` 必填，`order`/`label` 可选。**侧边栏拥有按钮**，并按同一个 id 去 `main` 里找要显示的页面；图标组件由 owner 以 `{ size, active }` 调用。`label` 用 thunk（每次投影重读，所以跟着语言走）。
+- `main`（keyed、root scope）：`key` 必填，注册同 key 会替换占位者；`conversation` 是保留 key。layout 只渲染**当前选中的 key**，所以切换面板是 shell 的事——本插件不需要隐藏别人的页面，也不需要"该让位了"的判断。
+- 两个槽位分别由 `@deepseek-ai/dsh-client-ui-sidebar` 与 `@deepseek-ai/dsh-client-ui-layout` 声明，`package.json` 的 `dsh.client.inject` 里列了这两个包，用途只是**排定激活顺序**。
+- 组件还会收到一批 standard props（`usePanelInfo` 等）；本插件不需要它们——是否"当前选中"由"组件是否被挂载"表达。
+
+槽位契约的权威来源是客户端 runner 自带的槽位目录（`@deepseek-ai/dsh-cordis-client-runner`：包含每个槽位的 `registerOptions`、`ownerProps`、`standardProps`），改代码前照它核对，不要靠猜。
+
+## 为什么访客常驻 DOM，而不是住在页面组件里
+
+`<webview>` 一旦脱离文档就会被销毁，重新挂载等于重新加载。而 layout 只渲染当前选中的 `main` key——**切到别的面板时本页面组件会卸载**。若把访客交给组件，用户每看一眼「插件」再切回来，页面就重载一次。
+
+所以：访客元素由本插件持有，挂在文档根上一个 `[data-dsh-webchat-overlay]` 容器里（`position: fixed`），生命周期是**整次运行**。页面组件只做两件事——拿到 shell 分配给它的格子并量出矩形（`getBoundingClientRect`），把常驻访客摆上去；卸载时**只隐藏、不摘除**：
+
+```js
+guest.container.style.display = alive ? "block" : "none"
+```
+
+矩形在 `ResizeObserver`（监听自己那个格子）与 `window resize` 时同步。面板的位置完全来自 slot 给它的空间，不去读别人的 DOM 或样式。插件被卸载时（`ctx.effect` 的清理）才移除容器并 `release(lease)`。
 
 ## 目录与"无构建"政策
 
-**没有构建步骤。** `lib/index.js` 与 `lib/client.js` 就是手写的运行时代码，也是唯一的事实来源；没有 `src/`、没有打包器、没有工具链。因此本包**零运行时依赖**。
+**没有构建步骤。** React 取自浏览器的模块表（`factory(require)` 里的 `require('react')`），其余是手写 DOM，因此本包**零运行时依赖**。
 
 ```
 lib/index.js       宿主半区 —— 两条路由 + 窗口降级策略（纯 web 环境才用得上）
-lib/client.js      浏览器半区 —— 侧边栏入口 + 中栏访客面板，纯 DOM
+lib/client.js      浏览器半区 —— 两个槽位注册 + 常驻访客
 cordis.patch.yml   profile 行
 test/*.test.mjs    node --test
 ```
 
 ## 宿主半区
 
-`inject: ['webServer']`，注册两条 exact 路由：
+`inject: ['webServer']`，两条 exact 路由：`GET /api/dsh-webchat/state`（诊断：`{ ok, url, appWindowOpen, last, attempts }`）与 `POST /api/dsh-webchat/open`（`{ ok, via, error, at }`，都没打开时 502）。
 
-| 路由 | 方法 | 返回 |
-| --- | --- | --- |
-| `/api/dsh-webchat/state` | GET | `{ ok, url, appWindowOpen, last, attempts }`（诊断用） |
-| `/api/dsh-webchat/open` | POST | `{ ok, via, error, at }`，一个都没打开时 502 |
+`openPage(strategies)` 依次走 `OPEN_STRATEGIES` 并记录**整条链路**（`attempts`），所以一次点击就能看出每条策略为什么失败。策略：`app-window`（先 `await import('electron')`，失败再 `createRequire(...)('electron')`，然后 `new BrowserWindow`）、`app-window-shell`（`msedge.exe`/`chrome.exe` + `--app=`）、`system-browser`。
 
-`openPage(strategies)` 依次走 `OPEN_STRATEGIES` 并记录**整条链路**（`attempts`），所以一次点击就能看出每条策略为什么失败。策略：
+窗口句柄挂在 `globalThis[Symbol.for('@jaychang1989/dsh-webchat.window')]`：否则一次热重载会交给新模块一个 `null`，把已开的窗口变成孤儿。dispose 时**不关窗口**。
 
-1. `app-window` —— 先 `await import('electron')`，失败再 `createRequire(import.meta.url)('electron')`，然后 `new BrowserWindow(...)`。两条探测都必须包在调用内部：拿不到 Electron 的宿主仍要能加载插件，探测失败要能落到下一个策略。ESM 那条优先，是因为 DSH 的加载器会自行解析裸模块名、未必把它交给 Electron 的解析器，而 CJS 的 `require` 由 Electron 原生提供。
-2. `app-window-shell` —— `msedge.exe` / `chrome.exe` 加 `--app=`，配私有 `--user-data-dir`。
-3. `system-browser` —— `cmd /c start`、`open` 或 `xdg-open`。
-
-窗口句柄挂在 `globalThis[Symbol.for('@jaychang1989/dsh-webchat.window')]` 而不是模块状态上：否则一次热重载会交给新模块一个 `null`，把已开的窗口变成孤儿。dispose 时**不关窗口**——设置变更会重新 apply 该 entry，为此关掉用户正在看的会话比留个孤儿窗口更糟。
-
-桌面端正常情况下永远走不到这三条：客户端有访客桥接，直接在中栏渲染。它们只服务于纯 `dsh web` 环境。
-
-## 浏览器半区
-
-产物是一个模块加载器工厂——没有 React，没有任何 import：
-
-```js
-window.__ModuleLoader__.load({
-  id: '<包名>',
-  factory: () => { /* … */ return module.exports },  // { apply, inject }
-})
-```
-
-**`id` 必须与包名逐字一致**（含 scope）：`dsh-client-modules` 用 manifest 里的包名给每个浏览器行建索引并据此物化，不一致就会静默地永不加载。`cordis.patch.yml` 里那行的 `name` 同样要对上。这三处是包名被编码的全部位置。
-
-启动时按 `globalThis.dshDesktop` 是否存在分两条路：
-
-- **有桥接（桌面端）**：入口切换中栏面板。面板容器按老办法注入 `[data-pane="conversation"], [class*="centerCol"]`，由 `<html data-dsh-webchat-active>` 控制显隐，并沿用"单占用中栏"的仲裁：打开时清掉 `data-dsh-taskboard-active` / `data-dsh-ssh-active` 并广播 `dsh-panel-activate`，收到别人的广播则自行关闭。访客**懒创建**：首次打开时 `acquire` 租约、建 webview、`dom-ready` 后 `loadURL`；关闭面板只是隐藏，访客保持挂载，所以重开不重载、不掉登录。卸载时移除元素并 `release(lease)`。
-- **无桥接（纯 web）**：入口退化为请求宿主 `POST /api/dsh-webchat/open`，并用提示条如实反馈成功/降级/失败（含旧宿主半区那个光秃秃的 `HTTP 404`）。
-
-`applyActive` 里先挂载再广播仲裁事件：事件会同步分发到其它插件，一个抛异常的监听者不该让本面板停在半开状态。
-
-样式表以单个 `<style id="dsh-webchat-style">` 注入，使用 shell 的 `--dsw-*` token；webview 的规则照抄内置浏览器（`-webkit-app-region:no-drag;border:0;flex:auto;width:100%;height:100%;display:flex`）。
+桌面端正常路径走不到这三条——客户端有访客桥接，直接在中栏渲染；它们只服务于纯 `dsh web` 环境，也就是面板里那个「在窗口中打开」按钮。
 
 ## 测试
 
@@ -80,13 +80,14 @@ window.__ModuleLoader__.load({
 node --test
 ```
 
-14 个用例：宿主半区用假 context 与假 request/response 驱动（路由、方法守卫、策略选择与失败链路）；浏览器半区用 `vm` 在一个最小 DOM 桩里真实执行，覆盖两种环境——桌面端（挂载入口、点击申请租约、按宿主约定生成 `about:blank#<lease>` 的 webview、`dom-ready` 后导航、关闭重开复用同一访客）与纯 web（降级为请求宿主开窗并如实提示，包括 `HTTP 404`）。
+19 个用例。宿主半区用假 context 与假 request/response 驱动（路由、方法守卫、策略选择与失败链路）；浏览器半区用一层薄的 React 测试替身（`createElement`/`useRef`/`useEffect`）+ DOM 桩**真实执行**：槽位注册契约（同一个 id、order、label thunk、按 `size` 出图标）、租约与 webview 属性、`dom-ready` 时先改 UA 再导航且顺序正确、**卸载只隐藏不摘除、重挂复用同一访客、只申请一次租约**、插件卸载释放租约，以及无桥接时的降级与失败提示。
 
 ## 无法从 app 外部验证的部分
 
-- **宿主是否真的批准访客**只能在运行中的桌面端验证：测试桩能证明插件按约定构造了 webview，但 `will-attach-webview` 的放行发生在主进程。中栏一旦出现「载入失败：…」，文本里带的就是宿主给的原因。
-- 窗口降级链里的 `app-window` 需要插件进程能拿到 Electron 的 `BrowserWindow`，同样只能靠重启后的真实进程验证；提示条会说明实际用了哪种策略。
+- **宿主是否真的批准访客**只能在运行中的桌面端验证：测试能证明插件按约定构造了 webview，但 `will-attach-webview` 的放行发生在主进程。
+- **槽位注册是否被接受**（例如 order 的落点、图标尺寸）同样要看真实渲染结果；测试只覆盖插件这一侧的参数。
+- 页面是否还会弹「使用环境异常」，取决于站点的检查逻辑，同样以真实页面为准。
 
 ## 来源
 
-本包最初由 `xmuwenxiang/dsh-web-chat` 分叉而来。至今沿用的部分是插件骨架（双半区打包、`cordis.patch.yml` 行、客户端 bundle 形式）以及侧边栏入口的 DOM 注入思路和随之而来的一套基础样式；现在插件所做的全部事情——中栏访客面板、窗口降级链、入口即动作——都是在这里写的。Apache-2.0 要求的署名见 `NOTICE`。
+本包最初由 `xmuwenxiang/dsh-web-chat` 分叉而来。至今沿用的部分是插件骨架（双半区打包、`cordis.patch.yml` 行、客户端 bundle 形式）与最早的侧边栏入口注入思路；现在插件所做的全部事情——槽位注册、常驻访客面板、窗口降级链、UA 处理——都是在这里写的。Apache-2.0 要求的署名见 `NOTICE`。

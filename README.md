@@ -19,6 +19,8 @@ iframe 和 `<webview>` 常规路径确实都被封死了：
 
 所以这个页面**不是嵌在 iframe 里**，而是宿主的原生访客——`frame-ancestors` 管不到它。这也解释了为什么它必须由 DSH 桌面端承载。
 
+而「侧边栏那一行」和「中栏那一页」都是 DSH 的**标准槽位**（`sidebar.panellist` 与 `main`，同一个 id 关联），按钮和面板切换都由 shell 自己掌管——所以这个插件不往别人的 DOM 里塞东西，也不需要去猜什么时候该让位。
+
 在没有该桥接的环境（纯 `dsh web`，非桌面端）会**自动降级**为打开一个窗口，保证入口永远有反应。
 
 ## 安装
@@ -42,7 +44,7 @@ dsh plugin --profile desktop add github:jaychang1989/dsh-webchat
 1. 点侧边栏的「DeepSeek 网页」入口 —— 页面直接在中栏载入，不需要第二次点击；
 2. 在里面登录一次 DeepSeek，当前这次运行内一直有效。
 
-再点一次入口收起面板；面板关闭后访客保持挂载，重新打开不会重新加载、也不会掉登录。点侧边栏里**任何其它行**（插件、自动化任务、任务看板、会话、工作区）都会把中栏让回去——那些页面由 shell 渲染在中栏，本插件不占用它们的席位。
+再点一次入口收起面板。切换去别的面板（插件、自动化任务、任务看板、会话……）时访客只是被隐藏、从不被卸载，所以切回来不会重新加载、也不会掉登录。
 
 ## 环境要求
 
@@ -60,9 +62,10 @@ dsh plugin --profile desktop add github:jaychang1989/dsh-webchat
 
 | 现象 | 原因 / 处理 |
 | --- | --- |
-| 入口没出现 | 确认 profile 的 `dsh.profile.bundles` 里有 `@jaychang1989/dsh-webchat`，然后重启桌面端 |
+| 侧边栏没出现「DeepSeek 网页」这一行 | 确认 profile 的 `dsh.profile.bundles` 里有 `@jaychang1989/dsh-webchat`，然后重启桌面端 |
 | 中栏提示「载入失败：…」 | 宿主拒绝了访客（桥接返回异常）。文本里带着宿主给的原因 |
-| 点了入口却弹出一个浏览器窗口 | 说明当前渲染进程拿不到 `dshDesktop.browser`（例如在纯 web 环境），插件走了降级路径 |
+| 这一行点了但中栏没有页面，反而弹出浏览器窗口 | 说明当前渲染进程拿不到 `dshDesktop.browser`（例如在纯 web 环境），插件走了降级路径 |
+| 这一行点了但中栏是空白 | 面板显示的空间是 shell 分配的那个格子；若窗口极小或侧栏被拖到极窄，格子可能没有面积 |
 | 重启后要求重新登录 | 见上面的「已知限制」，属于宿主分区机制 |
 | 页面弹出「使用环境异常」 | DeepSeek 前端会检查 `navigator.userAgent` 里是否含 `electron`（桌面端默认 UA 就含），命中就提示"建议使用官方产品"。0.5.2 起访客改用普通 Chrome UA，不再触发 |
 
@@ -72,9 +75,9 @@ dsh plugin --profile desktop add github:jaychang1989/dsh-webchat
 node --test
 ```
 
-14 个用例，其中浏览器半区在 DOM 桩里**真实执行**：桌面端环境下验证入口挂载、点击后申请租约、按宿主约定生成 `about:blank#<lease>` 的 webview、`dom-ready` 后导航到目标地址、关闭重开复用同一个访客；无桥接环境下验证降级为请求宿主开窗并如实提示结果。
+19 个用例。宿主半区用假 context 与假 request/response 驱动；浏览器半区用一层薄的 React 测试替身 + DOM 桩**真实执行**：验证它按槽位契约注册导航行与页面（同一个 id）、标签随语言变化、图标遵循 shell 要求的尺寸，以及访客生命周期——申请租约、按宿主约定生成 `about:blank#<lease>` 的 webview、`dom-ready` 后先改 UA 再导航、**卸载只隐藏不卸载访客、重挂复用同一个**、插件卸载时释放租约；无桥接环境下验证降级为请求宿主开窗并如实反馈。
 
-没有构建步骤——`lib/index.js` 与 `lib/client.js` 就是手写的运行时代码，包内**零运行时依赖**。访客机制的来龙去脉见 [MAINTAINING.md](./MAINTAINING.md)。
+没有构建步骤——`lib/index.js` 与 `lib/client.js` 就是手写的运行时代码（React 取自浏览器的模块表），包内**零运行时依赖**。访客机制与槽位契约见 [MAINTAINING.md](./MAINTAINING.md)。
 
 ## 来源与许可
 

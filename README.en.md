@@ -19,6 +19,8 @@ But the desktop shell keeps a door open for **approved browser guests**: the ren
 
 So the page is **not an iframe** — it is a native guest owned by the host, which is why `frame-ancestors` does not apply to it. It also means the desktop app is what makes it possible.
 
+The sidebar row and the page are both standard DSH **slots** (`sidebar.panellist` and `main`, joined by one shared id), so the shell owns the button and the panel switching. That is why this plugin injects nothing into anyone else's DOM and never has to guess when to step aside.
+
 Where that bridge is absent (a plain `dsh web` profile) the plugin **falls back** to opening a window, so the entry always does something.
 
 ## Install
@@ -42,7 +44,7 @@ dsh plugin --profile desktop add github:jaychang1989/dsh-webchat
 1. Click the "DeepSeek 网页 / DeepSeek Web" entry — the page loads in the center column; there is no second click.
 2. Sign in to DeepSeek once; that holds for the rest of the run.
 
-Click again to collapse the panel. The guest stays mounted while the panel is closed, so reopening neither reloads the page nor drops the session. Clicking **any other sidebar row** — Plugins, Automation Tasks, the task board, a session, a workspace — hands the center column back, because those pages are rendered there by the shell and this plugin does not hold their seat.
+Click again to collapse the panel. Switching to another panel (Plugins, Automation Tasks, the task board, a session …) only hides the guest, never unmounts it, so coming back neither reloads the page nor drops the session.
 
 ## Requirements
 
@@ -60,9 +62,10 @@ Click again to collapse the panel. The guest stays mounted while the panel is cl
 
 | Symptom | Cause / fix |
 | --- | --- |
-| The entry is missing | Check that `@jaychang1989/dsh-webchat` is in the profile's `dsh.profile.bundles`, then restart the desktop app |
+| No "DeepSeek Web" row in the sidebar | Check that `@jaychang1989/dsh-webchat` is in the profile's `dsh.profile.bundles`, then restart the desktop app |
 | The center column says "载入失败：…" | The host refused the guest (the bridge threw). The text carries the host's reason |
-| Clicking the entry opened a browser window instead | This renderer had no `dshDesktop.browser` (a plain web profile, for instance), so the fallback ran |
+| The row opens a browser window instead of a panel | This renderer had no `dshDesktop.browser` (a plain web profile, for instance), so the fallback ran |
+| The row opens but the center column is blank | The panel fills the cell the shell allocates; in a very small window, or with the sidebar dragged extremely narrow, that cell can have no area |
 | It asks for a login again after a restart | See the limitations above — it is the host's partition behaviour |
 | The page shows "Abnormal usage environment" | DeepSeek's front end checks `navigator.userAgent` for the string `electron` — which the desktop default carries — and then recommends its official product. Since 0.5.2 the guest presents a plain Chrome user agent and the dialog no longer appears |
 
@@ -72,7 +75,7 @@ Click again to collapse the panel. The guest stays mounted while the panel is cl
 node --test
 ```
 
-Fourteen cases, and the browser half really executes against a DOM stand-in: in a desktop environment it checks that the entry mounts, that clicking reserves a lease, that the webview is built the way the host requires (`about:blank#<lease>`), that navigation happens on `dom-ready`, and that closing and reopening reuses the same guest; without a bridge it checks the window fallback and its reporting.
+Nineteen cases. The host half is driven through a fake context and fake request/response objects; the browser half really executes against a thin React test double plus a DOM stand-in: it checks that the plugin registers its nav row and its page under the slot contract (one shared id), that the label follows the language, that the icon honours the size the shell asks for, and the whole guest lifecycle — reserving a lease, building the webview the way the host requires (`about:blank#<lease>`), setting the user agent before navigating on `dom-ready`, **hiding the guest without detaching it when the panel unmounts and reusing it on remount**, and releasing the lease on plugin disposal; without a bridge it checks the window fallback and its reporting.
 
 There is no build step — `lib/index.js` and `lib/client.js` are the hand-written runtime, and the package has **zero runtime dependencies**. The guest mechanism is written up in [MAINTAINING.md](./MAINTAINING.md) (Chinese).
 

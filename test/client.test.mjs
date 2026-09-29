@@ -1,14 +1,16 @@
 /**
- * Browser-half smoke test.
+ * Browser-half test.
  *
- * The client bundle only ever runs inside the GUI, so it is executed here
- * against a minimal DOM stand-in. Two environments matter:
+ * The client bundle only ever runs inside the GUI, so it executes here against
+ * a minimal DOM stand-in plus a small React test double. What matters:
  *
- *   - the desktop app, where `globalThis.dshDesktop.browser` lends a native
- *     guest, so the entry must open an in-window panel holding an approved
- *     `<webview>`;
- *   - a plain web profile, where no guest exists, so the entry must ask the host
- *     half for a window instead.
+ *   - it registers the sidebar row and the page as slots, under one shared id,
+ *     so the shell owns the button and the panel switching;
+ *   - the page reserves a guest and attaches the exact `<webview>` the desktop
+ *     shell approves;
+ *   - the guest lives outside the panel mount: hiding it must not detach it, and
+ *     remounting must reuse it;
+ *   - where no guest bridge exists, the panel offers the window fallback.
  */
 
 import { test } from 'node:test'
@@ -18,10 +20,9 @@ import { fileURLToPath } from 'node:url'
 import vm from 'node:vm'
 
 const BUNDLE = fileURLToPath(new URL('../lib/client.js', import.meta.url))
-const ENTRY = 'data-dsh-webchat-entry'
-const VIEW = 'data-dsh-webchat-view'
-const TOAST = 'data-dsh-webchat-toast'
 const PAGE_URL = 'https://chat.deepseek.com/'
+const PANEL_ID = 'webchat'
+const OVERLAY = 'data-dsh-webchat-overlay'
 
 /** A DOM element stub covering exactly what lib/client.js touches. */
 function element(tagName, document) {
@@ -29,16 +30,18 @@ function element(tagName, document) {
     tagName: tagName.toUpperCase(),
     children: [],
     attributes: {},
-    dataset: {},
+    style: {},
     parentElement: null,
     isConnected: true,
     textContent: '',
-    innerHTML: '',
     className: '',
     type: '',
     disabled: false,
     listeners: {},
     loadedUrls: [],
+    userAgents: [],
+    calls: [],
+    rect: { left: 280, top: 48, width: 900, height: 700 },
     setAttribute(name, value) {
       this.attributes[name] = String(value)
       if (name === 'id') this.id = String(value)
@@ -56,12 +59,9 @@ function element(tagName, document) {
       this.children.push(child)
       return child
     },
-    insertBefore(child, anchor) {
-      if (child.parentElement !== null) child.remove()
-      child.parentElement = this
-      const index = anchor === null || anchor === undefined ? this.children.length : this.children.indexOf(anchor)
-      this.children.splice(index < 0 ? this.children.length : index, 0, child)
-      return child
+    replaceChildren() {
+      this.children.forEach((child) => { child.parentElement = null; child.isConnected = false })
+      this.children = []
     },
     remove() {
       if (this.parentElement === null) return
@@ -79,46 +79,21 @@ function element(tagName, document) {
     },
     /** Electron's <webview> navigation entry point. */
     loadURL(url) {
+      this.calls.push('loadURL')
       this.loadedUrls.push(url)
       return Promise.resolve()
     },
     /** Electron's <webview> user-agent override. */
     setUserAgent(userAgent) {
-      this.userAgents = (this.userAgents ?? []).concat(userAgent)
+      this.calls.push('setUserAgent')
+      this.userAgents.push(userAgent)
     },
-    closest(selector) {
-      let node = this
-      while (node !== null && node !== undefined) {
-        if (selector.includes('data-dsh-webchat-entry') && node.getAttribute(ENTRY) !== null) return node
-        if (selector.includes('sidebar') && node === document._sidebarColumn) return node
-        node = node.parentElement
-      }
-      return null
-    },
-    matches() {
-      return false
-    },
-    querySelector(selector) {
-      if (selector.includes('data-part')) {
-        return this.children.find(child => child.getAttribute('data-part') !== null
-          && selector.includes(child.getAttribute('data-part'))) ?? null
-      }
-      return null
-    },
-    querySelectorAll() {
-      return []
-    },
-    contains(candidate) {
-      return this.children.includes(candidate)
+    getBoundingClientRect() {
+      return this.rect
     },
     dispatch(type, event) {
       const handler = this.listeners[type]
       return handler === undefined ? undefined : handler(event)
-    },
-    get nextElementSibling() {
-      if (this.parentElement === null) return null
-      const siblings = this.parentElement.children
-      return siblings[siblings.indexOf(this) + 1] ?? null
     },
     get firstElementChild() {
       return this.children[0] ?? null
@@ -128,303 +103,380 @@ function element(tagName, document) {
   return el
 }
 
-/**
- * Build the document stub with a sidebar column (logo row + new-session
- * button) and a conversation column already in place.
- * @returns the stub document.
- */
+/** Build the document stub: head, body, html[lang] and a queryable overlay slot. */
 function makeDocument() {
   const document = { created: [] }
   document.createElement = (tag) => element(tag, document)
-  document.createElementNS = (_ns, tag) => element(tag, document)
-
-  const head = element('head', document)
-  const body = element('body', document)
-  const html = element('html', document)
-
-  const sidebarColumn = element('div', document)
-  sidebarColumn.setAttribute('data-pane', 'sidebar')
-  const sidebarRootEl = element('div', document)
-  const logoRow = element('div', document)
-  logoRow.className = 'logoRow'
-  const newSession = element('button', document)
-  newSession.className = 'newSession'
-  logoRow.appendChild(newSession)
-  sidebarRootEl.appendChild(logoRow)
-  sidebarColumn.appendChild(sidebarRootEl)
-  // The real shell nests the New Session button inside the logo row; the stub
-  // answers the one selector lib/client.js uses to find it.
-  sidebarRootEl.querySelector = (selector) => (selector.includes('newSession') ? newSession : null)
-
-  const conversation = element('div', document)
-  conversation.setAttribute('data-pane', 'conversation')
-
-  // A shell-owned navigation row, the way Plugins and Automation Tasks appear.
-  const pluginsRow = element('button', document)
-  pluginsRow.className = 'panelRow'
-  sidebarRootEl.appendChild(pluginsRow)
-
-  document.head = head
-  document.body = body
-  document.documentElement = html
+  document.head = element('head', document)
+  document.body = element('body', document)
+  document.documentElement = element('html', document)
+  document.documentElement.setAttribute('lang', 'zh-CN')
   document.getElementById = (id) => document.created.find((el) => el.id === id) ?? null
   document.querySelector = (selector) => {
-    if (selector.includes('sidebar')) return sidebarColumn
-    if (selector.includes('conversation') || selector.includes('centerCol')) return conversation
-    if (selector.includes('toast')) return document.created.find((el) => el.getAttribute(TOAST) !== null && el.isConnected) ?? null
-    if (selector.includes('entry')) return document.created.find((el) => el.getAttribute(ENTRY) !== null) ?? null
+    if (selector.includes(OVERLAY)) {
+      return document.created.find((el) => el.getAttribute(OVERLAY) !== null && el.isConnected) ?? null
+    }
     return null
   }
-  document.querySelectorAll = () => []
-  // Document-level listeners are captured so a test can drive navigation the way
-  // the shell does, and so the panel's arbitration event can be delivered.
-  document.listeners = {}
-  document.addEventListener = (type, handler) => {
-    document.listeners[type] = (document.listeners[type] ?? []).concat(handler)
-  }
-  document.removeEventListener = (type, handler) => {
-    document.listeners[type] = (document.listeners[type] ?? []).filter(entry => entry !== handler)
-  }
-  document.dispatchEvent = (event) => {
-    for (const handler of document.listeners[event?.type] ?? []) handler(event)
-    return true
-  }
-  document._sidebarRoot = sidebarRootEl
-  document._sidebarColumn = sidebarColumn
-  document._navRow = pluginsRow
-  document._conversation = conversation
   return document
 }
 
-/** Fire a document-level click with the given target, as the browser would. */
-function clickWith(document, target) {
-  for (const handler of document.listeners.click ?? []) handler({ target })
+/** A window stub recording resize listeners. */
+function makeWindow() {
+  return {
+    listeners: {},
+    addEventListener(type, handler) {
+      this.listeners[type] = (this.listeners[type] ?? []).concat(handler)
+    },
+    removeEventListener(type, handler) {
+      this.listeners[type] = (this.listeners[type] ?? []).filter((entry) => entry !== handler)
+    },
+  }
 }
 
 /**
- * Load the bundle with a fresh global set.
+ * A React test double: enough of createElement/useRef/useEffect to render one
+ * component and drive its mount and unmount the way React does.
+ * @returns the double plus a `render` helper.
+ */
+function makeReact() {
+  let cursor = null
+  const createElement = (type, props, ...children) => ({
+    type,
+    props: {
+      ...(props ?? {}),
+      children: children.length === 0 ? undefined : children.length === 1 ? children[0] : children,
+    },
+  })
+  const nextCell = () => {
+    const cell = cursor.cells[cursor.index] ?? (cursor.cells[cursor.index] = {})
+    cursor.index += 1
+    return cell
+  }
+  const React = {
+    createElement,
+    useRef(initial) {
+      const cell = nextCell()
+      if (cell.ref === undefined) cell.ref = { current: initial }
+      return cell.ref
+    },
+    useEffect(fn) {
+      nextCell().effect = fn
+    },
+  }
+  return {
+    React,
+    /** Render once; the ref is attached before effects run, as React does. */
+    render(Component, props) {
+      cursor = { cells: [], index: 0 }
+      const tree = Component(props ?? {})
+      const effects = cursor.cells.map((cell) => cell.effect).filter((fn) => typeof fn === 'function')
+      return {
+        tree,
+        /** Attach the host element to the tree's ref, then run the effects. */
+        mount(host) {
+          const ref = tree !== null && tree.props !== undefined ? tree.props.ref : undefined
+          if (ref !== undefined && host !== undefined) ref.current = host
+          return effects.map((fn) => fn()).filter((fn) => typeof fn === 'function')
+        },
+      }
+    },
+  }
+}
+
+/**
+ * Load the bundle.
  * @param document - DOM stand-in.
- * @param options - `fetchImpl` for the window fallback and `bridge: false` to
- *   simulate a plain web profile (no desktop guest bridge).
- * @returns the loader rows and the recorded guest calls.
+ * @param options - `bridge: false` for a plain web profile, an overriding
+ *   `bridge` object, or a `fetchImpl` for the fallback.
+ * @returns the loader rows, the recorded guest calls and the sandbox.
  */
 function loadBundle(document, options = {}) {
   const rows = []
   const guestCalls = { acquired: [], released: [] }
-  const bridge = options.bridge === false
-    ? undefined
-    : {
-      protocolVersion: 1,
-      browser: {
-        acquire: async (workspace) => {
-          guestCalls.acquired.push(workspace)
-          return { lease: 'lease-1', partition: 'dsh-sidebar-browser-test' }
-        },
-        release: async (lease) => { guestCalls.released.push(lease) },
-        onOpenRequested: () => () => {},
-      },
-    }
+  const fakeReact = makeReact()
   const sandbox = {
-    window: { __ModuleLoader__: { load: (row) => rows.push(row) } },
+    window: { __ModuleLoader__: { load: (row) => rows.push(row) }, ...makeWindow() },
     document,
-    navigator: {
-      language: 'zh-CN',
-      // The desktop renderer's own user agent, Electron tokens and all.
-      userAgent: 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) dsh/0.2.0-rc.1 Chrome/131.0.6778.86 Electron/33.2.1 Safari/537.36',
-    },
+    navigator: { language: 'zh-CN', userAgent: options.userAgent },
     console: { warn() {}, log() {}, error() {} },
     fetch: options.fetchImpl ?? (async () => ({ ok: true, status: 200, json: async () => ({ ok: true, via: 'app-window' }) })),
-    MutationObserver: class {
+    ResizeObserver: class {
+      constructor(callback) {
+        this.callback = callback
+        sandbox.observed.push(this)
+      }
       observe() {}
       disconnect() {}
     },
-    CustomEvent: class {
-      constructor(type, init) {
-        this.type = type
-        this.detail = init?.detail
-      }
+    observed: [],
+    require: (name) => {
+      if (name === 'react') return fakeReact.React
+      throw new Error('unexpected require: ' + name)
     },
-    setTimeout: () => 0,
-    clearTimeout: () => {},
   }
-  if (bridge !== undefined) sandbox.dshDesktop = bridge
+  const bridge = options.bridge === false
+    ? undefined
+    : options.bridge ?? {
+      acquire: async (workspace) => {
+        guestCalls.acquired.push(workspace)
+        return { lease: 'lease-1', partition: 'dsh-sidebar-browser-test' }
+      },
+      release: async (lease) => { guestCalls.released.push(lease) },
+    }
+  if (bridge !== undefined) sandbox.dshDesktop = { protocolVersion: 1, browser: bridge }
   const context = vm.createContext(sandbox)
   vm.runInContext(readFileSync(BUNDLE, 'utf8'), context, { filename: 'client.js' })
-  return { rows, guestCalls }
+  return { rows, guestCalls, sandbox, react: fakeReact }
 }
 
-/** Mount the plugin and return its sidebar entry and guest handles. */
-function mount(document, options) {
-  const { rows, guestCalls } = loadBundle(document, options)
-  const plugin = rows[0].factory()
-  plugin.apply({ effect: (fn) => { const off = fn(); return () => { if (typeof off === 'function') off() } } })
-  const entry = document.created.find((el) => el.getAttribute(ENTRY) !== null)
-  const view = document._conversation.children.find((el) => el.getAttribute(VIEW) !== null)
-  const webview = () => document.created.find((el) => el.tagName === 'WEBVIEW')
-  return { plugin, entry, view, webview, guestCalls }
+/** Load the plugin and capture the slot registrations it installs. */
+function loadPlugin(document, options) {
+  const { rows, guestCalls, sandbox, react } = loadBundle(document, options)
+  const plugin = rows[0].factory(sandbox.require)
+  const registrations = []
+  const effects = []
+  const ctx = {
+    slots: {
+      inject(ownerKey, callback) {
+        callback()
+        return () => {}
+      },
+      register(definition, component) {
+        registrations.push({ definition, component })
+        return () => {}
+      },
+    },
+    effect(fn) {
+      effects.push(fn)
+      return () => {}
+    },
+  }
+  return { plugin, ctx, registrations, effects, guestCalls, sandbox, react }
 }
 
-/** Let the click handler's awaits settle. */
+/** Let the guest promise chain settle. */
 async function settle() {
   for (let i = 0; i < 6; i++) await new Promise((resolve) => setImmediate(resolve))
 }
 
-test('the bundle registers under the package name', () => {
+test('the bundle registers under the package name and asks for slots', () => {
   const document = makeDocument()
-  const { rows } = loadBundle(document)
+  const { rows, sandbox } = loadBundle(document)
+  const plugin = rows[0].factory(sandbox.require)
 
   assert.equal(rows.length, 1)
   assert.equal(rows[0].id, '@jaychang1989/dsh-webchat')
-  assert.equal(typeof rows[0].factory, 'function')
+  assert.deepEqual([...plugin.inject], ['slots'])
+  assert.equal(typeof plugin.apply, 'function')
 })
 
-test('on the desktop the entry mounts the center-column view', () => {
+test('apply registers the sidebar row and the matching main panel', () => {
   const document = makeDocument()
-  const { plugin, entry, view } = mount(document)
+  const { plugin, ctx, registrations } = loadPlugin(document)
+  plugin.apply(ctx)
 
-  assert.equal(typeof plugin.apply, 'function')
-  assert.deepEqual([...plugin.inject], [])
-  assert.ok(entry !== undefined, 'sidebar entry was not created')
-  assert.equal(entry.parentElement, document._sidebarRoot)
-  assert.ok(view !== undefined, 'the panel container was not appended to the center column')
+  assert.equal(registrations.length, 2)
+  const [row, page] = registrations
+  assert.equal(row.definition.name, 'sidebar.panellist')
+  assert.equal(row.definition.id, PANEL_ID)
+  assert.equal(row.definition.order, -1)
+  assert.equal(typeof row.definition.label, 'function')
+  assert.equal(row.definition.label(), 'DeepSeek 网页')
+  assert.equal(page.definition.name, 'main')
+  assert.equal(page.definition.key, PANEL_ID, 'the main cell key must be the row id')
+  assert.equal(typeof row.component, 'function')
+  assert.equal(typeof page.component, 'function')
   assert.ok(document.getElementById('dsh-webchat-style') !== null, 'stylesheet was not injected')
 })
 
-test('opening the panel reserves a guest and attaches an approved webview', async () => {
+test('the row label follows the document language', () => {
   const document = makeDocument()
-  const { entry, webview, guestCalls } = mount(document)
+  const { plugin, ctx, registrations } = loadPlugin(document)
+  plugin.apply(ctx)
 
-  assert.equal(webview(), undefined, 'no guest should exist before the first open')
+  assert.equal(registrations[0].definition.label(), 'DeepSeek 网页')
+  document.documentElement.setAttribute('lang', 'en-US')
+  assert.equal(registrations[0].definition.label(), 'DeepSeek Web')
+})
 
-  await entry.dispatch('click', { target: null })
+test('the row icon honours the size the sidebar asks for', () => {
+  const document = makeDocument()
+  const { plugin, ctx, registrations } = loadPlugin(document)
+  plugin.apply(ctx)
+
+  const tree = registrations[0].component({ size: 20, active: true })
+  assert.equal(tree.type, 'svg')
+  assert.equal(tree.props.width, 20)
+  assert.equal(tree.props.height, 20)
+  assert.equal(tree.props['aria-hidden'], true)
+})
+
+test('the panel reserves a guest and attaches the webview the shell approves', async () => {
+  const document = makeDocument()
+  const { plugin, ctx, registrations, guestCalls, react } = loadPlugin(document)
+  plugin.apply(ctx)
+
+  const rendered = react.render(registrations[1].component)
+  const host = element('div', document)
+  rendered.mount(host)
   await settle()
 
   assert.deepEqual(guestCalls.acquired, ['dsh-webchat'])
-
-  const frame = webview()
+  const frame = document.created.find((el) => el.tagName === 'WEBVIEW')
   assert.ok(frame !== undefined, 'the webview was not attached')
   assert.equal(frame.getAttribute('partition'), 'dsh-sidebar-browser-test')
   assert.equal(frame.getAttribute('name'), 'lease-1')
   assert.equal(frame.getAttribute('src'), 'about:blank#lease-1')
   assert.equal(frame.getAttribute('allowpopups'), '')
-  assert.equal(frame.parentElement, document._conversation.children[0])
+  const container = frame.parentElement
+  assert.equal(container.getAttribute(OVERLAY), '', 'the guest must live at the document root')
+  assert.equal(container.style.display, 'block')
+  assert.equal(container.style.left, '280px')
+  assert.equal(container.style.width, '900px')
 
-  // The page is navigated once the guest reports its document ready.
   frame.dispatch('dom-ready', {})
   await settle()
   assert.deepEqual(frame.loadedUrls, [PAGE_URL])
 })
 
-test('the guest is given a Chrome user agent, not the Electron one', async () => {
+test('the guest outlives the panel mount and is reused on the next one', async () => {
   const document = makeDocument()
-  const { entry, webview } = mount(document)
+  const { plugin, ctx, registrations, guestCalls, react } = loadPlugin(document)
+  plugin.apply(ctx)
+  const Panel = registrations[1].component
 
-  await entry.dispatch('click', { target: null })
+  const first = react.render(Panel)
+  const unmount = first.mount(element('div', document))
   await settle()
-  const frame = webview()
-
-  // chat.deepseek.com shows its "abnormal usage environment" dialog for any
-  // user agent containing "electron", so neither the attribute nor the
-  // post-attach override may carry one.
-  const expected = 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/131.0.0.0 Safari/537.36'
-  assert.equal(frame.getAttribute('useragent'), expected)
-
+  const frame = document.created.find((el) => el.tagName === 'WEBVIEW')
+  const container = frame.parentElement
   frame.dispatch('dom-ready', {})
   await settle()
-  assert.deepEqual(frame.userAgents, [expected])
-  for (const value of [frame.getAttribute('useragent'), ...frame.userAgents]) {
-    assert.doesNotMatch(value, /electron/i)
-  }
-  // The override must land before the page is requested, or it would be moot.
-  assert.deepEqual(frame.loadedUrls, [PAGE_URL])
-})
 
-test('closing and reopening keeps the same guest', async () => {
-  const document = makeDocument()
-  const { entry, guestCalls, webview } = mount(document)
+  // Switching to another panel unmounts this one: hide the guest, never detach it.
+  unmount.forEach((fn) => fn())
+  assert.equal(container.style.display, 'none', 'the guest must be hidden while another panel is selected')
+  assert.equal(frame.parentElement, container, 'the guest must not be detached')
+  assert.equal(container.parentElement, document.body, 'the container must stay at the document root')
 
-  await entry.dispatch('click', { target: null })
-  await settle()
-  const first = webview()
-  first.dispatch('dom-ready', {})
+  const second = react.render(Panel)
+  second.mount(element('div', document))
   await settle()
 
-  await entry.dispatch('click', { target: null })
-  await settle()
-  await entry.dispatch('click', { target: null })
-  await settle()
-
-  assert.equal(webview(), first, 'the guest was replaced instead of reused')
-  assert.deepEqual(guestCalls.acquired, ['dsh-webchat'])
+  assert.equal(document.created.filter((el) => el.tagName === 'WEBVIEW').length, 1, 'the guest was replaced')
+  assert.equal(frame.parentElement, container)
+  assert.equal(container.style.display, 'block')
+  assert.deepEqual(guestCalls.acquired, ['dsh-webchat'], 'the lease must be acquired once')
   assert.deepEqual(guestCalls.released, [])
 })
 
-test('without the desktop bridge the entry asks the host for a window', async () => {
+test('plugin disposal releases the guest', async () => {
+  const document = makeDocument()
+  const { plugin, ctx, registrations, effects, guestCalls, react } = loadPlugin(document)
+  plugin.apply(ctx)
+
+  const rendered = react.render(registrations[1].component)
+  rendered.mount(element('div', document))
+  await settle()
+
+  const cleanups = effects.map((fn) => fn()).filter((fn) => typeof fn === 'function')
+  cleanups.forEach((fn) => fn())
+
+  assert.deepEqual(guestCalls.released, ['lease-1'])
+  assert.equal(document.querySelector('[' + OVERLAY + ']'), null, 'the container must be removed')
+})
+
+test('the guest never advertises Electron to the page', async () => {
+  const document = makeDocument()
+  const { plugin, ctx, registrations, react } = loadPlugin(document, {
+    // What an Electron renderer actually reports.
+    userAgent: 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) dsh/0.2.0-rc.1 Chrome/138.0.7204.50 Electron/37.0.0 Safari/537.36',
+  })
+  plugin.apply(ctx)
+
+  const rendered = react.render(registrations[1].component)
+  rendered.mount(element('div', document))
+  await settle()
+
+  const frame = document.created.find((el) => el.tagName === 'WEBVIEW')
+  const declared = frame.getAttribute('useragent')
+  assert.ok(declared !== null, 'the guest must declare a clean user agent')
+  assert.ok(!declared.toLowerCase().includes('electron'), `the attribute still advertises Electron: ${declared}`)
+  assert.match(declared, /Chrome\/138/, 'the Chrome major version must stay truthful')
+
+  // The shell rewrites the guest's preferences, so the UA is set once more on
+  // the live guest — and before anything is requested.
+  frame.dispatch('dom-ready', {})
+  await settle()
+  assert.deepEqual(frame.userAgents, [declared])
+  assert.deepEqual(frame.calls, ['setUserAgent', 'loadURL'], 'the user agent must land before the first navigation')
+})
+
+test('a renderer that reports no user agent adds no override', async () => {
+  const document = makeDocument()
+  const { plugin, ctx, registrations, react } = loadPlugin(document)
+  plugin.apply(ctx)
+
+  const rendered = react.render(registrations[1].component)
+  rendered.mount(element('div', document))
+  await settle()
+
+  const frame = document.created.find((el) => el.tagName === 'WEBVIEW')
+  assert.equal(frame.getAttribute('useragent'), null)
+  frame.dispatch('dom-ready', {})
+  await settle()
+  assert.deepEqual(frame.userAgents, [])
+  assert.deepEqual(frame.calls, ['loadURL'])
+})
+
+test('without the desktop bridge the panel offers the window fallback', async () => {
   const document = makeDocument()
   const calls = []
-  const { entry, webview } = mount(document, {
+  const { plugin, ctx, registrations, guestCalls, react } = loadPlugin(document, {
     bridge: false,
     fetchImpl: async (path, init) => {
       calls.push({ path, method: init?.method ?? 'GET' })
       return { ok: true, status: 200, json: async () => ({ ok: true, via: 'app-window' }) }
     },
   })
+  plugin.apply(ctx)
 
-  await entry.dispatch('click', { target: null })
+  const rendered = react.render(registrations[1].component)
+  const host = element('div', document)
+  rendered.mount(host)
+  await settle()
+
+  assert.deepEqual(guestCalls.acquired, [], 'no guest may be reserved without a bridge')
+  const box = host.children[0]
+  assert.match(box.textContent, /无法在窗口内显示官方页面/)
+  const button = box.children.find((child) => child.tagName === 'BUTTON')
+  assert.ok(button !== undefined, 'the fallback must offer an action')
+  assert.equal(button.textContent, '在窗口中打开')
+
+  await button.dispatch('click', {})
   await settle()
 
   assert.deepEqual(calls, [{ path: '/api/dsh-webchat/open', method: 'POST' }])
-  assert.equal(webview(), undefined, 'no guest should be attempted without the bridge')
-  const toast = document.created.find((el) => el.getAttribute(TOAST) !== null && el.isConnected)
-  assert.equal(toast.textContent, '已打开 DeepSeek 网页')
-  assert.equal(entry.disabled, false)
+  assert.equal(button.disabled, false)
+  assert.equal(box.children[1].textContent, '已打开 DeepSeek 网页')
 })
 
-test('a refused window fallback is reported', async () => {
+test('a refused guest is reported with the host reason', async () => {
   const document = makeDocument()
-  const { entry } = mount(document, {
-    bridge: false,
-    fetchImpl: async () => ({ ok: false, status: 502, json: async () => ({ ok: false, via: 'system-browser', error: 'no way to open the page' }) }),
+  const { plugin, ctx, registrations, react } = loadPlugin(document, {
+    bridge: {
+      acquire: async () => { throw new Error('desktop browser: a workspace storage identity is required') },
+      release: async () => {},
+    },
   })
+  plugin.apply(ctx)
 
-  await entry.dispatch('click', { target: null })
+  const rendered = react.render(registrations[1].component)
+  const host = element('div', document)
+  rendered.mount(host)
   await settle()
 
-  const toast = document.created.find((el) => el.getAttribute(TOAST) !== null && el.isConnected)
-  assert.equal(toast.getAttribute('data-state'), 'bad')
-  assert.match(toast.textContent, /no way to open the page/)
-})
-
-test('navigating from the sidebar yields the center column', async () => {
-  const document = makeDocument()
-  const { entry } = mount(document)
-  const html = document.documentElement
-
-  await entry.dispatch('click', { target: null })
-  await settle()
-  assert.equal(html.getAttribute('data-dsh-webchat-active'), '', 'the panel should own the column after opening')
-
-  // A click outside the sidebar is not navigation and must not disturb the panel.
-  clickWith(document, document.body)
-  assert.equal(html.getAttribute('data-dsh-webchat-active'), '', 'a click outside the sidebar must not close the panel')
-
-  // Shell-owned rows (Plugins, Automation Tasks, the task board, sessions) do
-  // not take part in the data-*-active handshake, so the panel has to yield.
-  clickWith(document, document._navRow)
-  assert.equal(html.getAttribute('data-dsh-webchat-active'), null, 'the panel must yield the column to a shell panel')
-  assert.equal(entry.getAttribute('data-active'), null, 'the row must stop looking selected')
-})
-
-test('another third-party panel claiming the column closes this one', async () => {
-  const document = makeDocument()
-  const { entry } = mount(document)
-  const html = document.documentElement
-
-  await entry.dispatch('click', { target: null })
-  await settle()
-  assert.equal(html.getAttribute('data-dsh-webchat-active'), '')
-
-  document.dispatchEvent({ type: 'dsh-panel-activate', detail: 'taskboard' })
-
-  assert.equal(html.getAttribute('data-dsh-webchat-active'), null)
+  assert.match(host.children[0].textContent, /载入失败/)
+  assert.match(host.children[0].textContent, /workspace storage identity/)
 })
