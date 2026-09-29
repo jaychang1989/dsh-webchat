@@ -42,7 +42,7 @@ dsh plugin --profile desktop add github:jaychang1989/dsh-webchat
 1. Click the "DeepSeek 网页 / DeepSeek Web" entry — the page loads in the center column; there is no second click.
 2. Sign in to DeepSeek once; that holds for the rest of the run.
 
-Click again to collapse the panel. The guest stays mounted while the panel is closed, so reopening neither reloads the page nor drops the session. Clicking a session or workspace row in the sidebar hands the center column back to the conversation.
+Click again to collapse the panel. The guest stays mounted while the panel is closed, so reopening neither reloads the page nor drops the session. Clicking **any other sidebar row** — Plugins, Automation Tasks, the task board, a session, a workspace — hands the center column back, because those pages are rendered there by the shell and this plugin does not hold their seat.
 
 ## Requirements
 

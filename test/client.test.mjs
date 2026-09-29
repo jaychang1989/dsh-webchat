@@ -82,7 +82,13 @@ function element(tagName, document) {
       this.loadedUrls.push(url)
       return Promise.resolve()
     },
-    closest() {
+    closest(selector) {
+      let node = this
+      while (node !== null && node !== undefined) {
+        if (selector.includes('data-dsh-webchat-entry') && node.getAttribute(ENTRY) !== null) return node
+        if (selector.includes('sidebar') && node === document._sidebarColumn) return node
+        node = node.parentElement
+      }
       return null
     },
     matches() {
@@ -149,6 +155,11 @@ function makeDocument() {
   const conversation = element('div', document)
   conversation.setAttribute('data-pane', 'conversation')
 
+  // A shell-owned navigation row, the way Plugins and Automation Tasks appear.
+  const pluginsRow = element('button', document)
+  pluginsRow.className = 'panelRow'
+  sidebarRootEl.appendChild(pluginsRow)
+
   document.head = head
   document.body = body
   document.documentElement = html
@@ -161,12 +172,29 @@ function makeDocument() {
     return null
   }
   document.querySelectorAll = () => []
-  document.addEventListener = () => {}
-  document.removeEventListener = () => {}
-  document.dispatchEvent = () => {}
+  // Document-level listeners are captured so a test can drive navigation the way
+  // the shell does, and so the panel's arbitration event can be delivered.
+  document.listeners = {}
+  document.addEventListener = (type, handler) => {
+    document.listeners[type] = (document.listeners[type] ?? []).concat(handler)
+  }
+  document.removeEventListener = (type, handler) => {
+    document.listeners[type] = (document.listeners[type] ?? []).filter(entry => entry !== handler)
+  }
+  document.dispatchEvent = (event) => {
+    for (const handler of document.listeners[event?.type] ?? []) handler(event)
+    return true
+  }
   document._sidebarRoot = sidebarRootEl
+  document._sidebarColumn = sidebarColumn
+  document._navRow = pluginsRow
   document._conversation = conversation
   return document
+}
+
+/** Fire a document-level click with the given target, as the browser would. */
+function clickWith(document, target) {
+  for (const handler of document.listeners.click ?? []) handler({ target })
 }
 
 /**
@@ -333,4 +361,38 @@ test('a refused window fallback is reported', async () => {
   const toast = document.created.find((el) => el.getAttribute(TOAST) !== null && el.isConnected)
   assert.equal(toast.getAttribute('data-state'), 'bad')
   assert.match(toast.textContent, /no way to open the page/)
+})
+
+test('navigating from the sidebar yields the center column', async () => {
+  const document = makeDocument()
+  const { entry } = mount(document)
+  const html = document.documentElement
+
+  await entry.dispatch('click', { target: null })
+  await settle()
+  assert.equal(html.getAttribute('data-dsh-webchat-active'), '', 'the panel should own the column after opening')
+
+  // A click outside the sidebar is not navigation and must not disturb the panel.
+  clickWith(document, document.body)
+  assert.equal(html.getAttribute('data-dsh-webchat-active'), '', 'a click outside the sidebar must not close the panel')
+
+  // Shell-owned rows (Plugins, Automation Tasks, the task board, sessions) do
+  // not take part in the data-*-active handshake, so the panel has to yield.
+  clickWith(document, document._navRow)
+  assert.equal(html.getAttribute('data-dsh-webchat-active'), null, 'the panel must yield the column to a shell panel')
+  assert.equal(entry.getAttribute('data-active'), null, 'the row must stop looking selected')
+})
+
+test('another third-party panel claiming the column closes this one', async () => {
+  const document = makeDocument()
+  const { entry } = mount(document)
+  const html = document.documentElement
+
+  await entry.dispatch('click', { target: null })
+  await settle()
+  assert.equal(html.getAttribute('data-dsh-webchat-active'), '')
+
+  document.dispatchEvent({ type: 'dsh-panel-activate', detail: 'taskboard' })
+
+  assert.equal(html.getAttribute('data-dsh-webchat-active'), null)
 })
