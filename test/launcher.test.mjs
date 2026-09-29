@@ -68,6 +68,27 @@ test('the state route reports the page and the closed window', async () => {
   assert.equal(payload.url, PAGE_URL)
   assert.equal(payload.appWindowOpen, false)
   assert.equal(typeof payload.last.ok, 'boolean')
+  assert.ok(Array.isArray(payload.attempts))
+})
+
+test('the state route reports every strategy that ran, failures included', async () => {
+  const { ctx, routes } = fakeContext()
+  apply(ctx)
+  const state = routes.find(route => route.path === ROUTES.state)
+
+  await openPage([
+    { via: 'app-window', run: async () => { throw new Error('esm import failed: not found | cjs require failed: not found') } },
+    { via: 'app-window-shell', run: async () => 'app-window-shell' },
+    { via: 'system-browser', run: async () => 'system-browser' },
+  ])
+
+  const response = fakeResponse()
+  await state.handler({ method: 'GET' }, response)
+  const payload = JSON.parse(response.body)
+
+  assert.deepEqual(payload.attempts.map(a => [a.via, a.ok]), [['app-window', false], ['app-window-shell', true]])
+  assert.match(payload.attempts[0].error, /cjs require failed/)
+  assert.equal(payload.last.ok, true)
 })
 
 test('the state route refuses anything but GET', async () => {
