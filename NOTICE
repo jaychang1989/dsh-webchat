@@ -1,0 +1,18 @@
+dsh-webchat
+Copyright 2026 jaychang1989
+
+This product is a maintained fork of dsh-web-chat
+(https://github.com/xmuwenxiang/dsh-web-chat), Copyright the dsh-web-chat
+authors, licensed under the Apache License, Version 2.0.
+
+The fork retargets the plugin at the DeepSeek Harness 0.2.x plugin APIs:
+
+  * the settings section is no longer registered by the plugin
+    (`installSettingsSection` / `settingsNamespace` were removed from
+    `@deepseek-ai/dsh-settings` in 0.1.7; forms are now derived from the
+    profile entry and its exported `Config`);
+  * session persistence is addressed through per-session handles
+    (`sessionPersistence.open` / `create` + handle `read` / `append` / `flush`)
+    instead of the retired service-level `load` / `append` pair.
+
+See MAINTAINING.md for the exact files and the shipped-build policy.
