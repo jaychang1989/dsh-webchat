@@ -1,6 +1,6 @@
 # dsh-webchat
 
-在 [DeepSeek Harness](https://github.com/deepseek-ai/deepseek-harness) 里打开 [chat.deepseek.com](https://chat.deepseek.com) 官方网页版：侧边栏一个入口，面板一个按钮，点开就是官方页面。
+在 [DeepSeek Harness](https://github.com/deepseek-ai/deepseek-harness) 里打开 [chat.deepseek.com](https://chat.deepseek.com) 官方网页版：侧边栏一个入口，**点一下就直接打开官方页面**。
 
 **不再重新实现聊天界面。** 官方网页版本身就是完整的客户端——模型选择、深度思考、智能搜索、历史记录、附件上传都在里面。本插件只负责把它打开，别的一概不管。
 
@@ -15,7 +15,7 @@
 
 ## 打开顺序
 
-按钮会按顺序尝试，第一个成功的生效，面板上会显示实际用了哪种：
+点击入口后会按顺序尝试，第一个成功的生效，结果用一条短提示告诉你实际用了哪种：
 
 1. **`app-window`** —— 由 DSH 桌面端进程直接创建的窗口（桌面端就是 Electron）。已经开着就聚焦，不会重复开第二个。
 2. **`app-window-shell`** —— 无边框的 Edge/Chrome 窗口（`--app=`），使用独立 `--user-data-dir`（`~/.dsh/dsh-webchat/app-window`），因此登录态与你的日常浏览器互不干扰。用于第 1 种被宿主拒绝的场景。
@@ -41,9 +41,10 @@ dsh plugin --profile desktop add github:jaychang1989/dsh-webchat
 
 ## 使用
 
-1. 点侧边栏的「DeepSeek 网页」入口；
-2. 点面板里的「打开 chat.deepseek.com」；
-3. 在弹出的窗口里登录一次，之后正常使用官方网页版。
+1. 点侧边栏的「DeepSeek 网页」入口 —— 页面直接打开，不需要再点第二次；
+2. 在弹出的窗口里登录一次，之后正常使用官方网页版。
+
+点击后右下角会有一条短提示说明结果：`已打开 DeepSeek 网页` / `已交给系统默认浏览器打开` / 失败原因（例如 `HTTP 404`，通常意味着宿主半区还是旧版本，重启桌面端即可）。
 
 ## 与 0.3.x 的差异（这是一次大幅删减）
 

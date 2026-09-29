@@ -1,6 +1,6 @@
 # dsh-webchat
 
-Opens the official [chat.deepseek.com](https://chat.deepseek.com) web app from inside [DeepSeek Harness](https://github.com/deepseek-ai/deepseek-harness): one sidebar entry, one button, and the official page itself.
+Opens the official [chat.deepseek.com](https://chat.deepseek.com) web app from inside [DeepSeek Harness](https://github.com/deepseek-ai/deepseek-harness): one sidebar entry, and **clicking it opens the official page directly**.
 
 **It no longer reimplements the chat UI.** The official web app is the client — model picker, deep think, smart search, history and attachments all live there. This plugin opens it and nothing else.
 
@@ -15,7 +15,7 @@ A real window is therefore the only faithful way to show the official page.
 
 ## What opens, in order
 
-The button tries these in order and reports which one worked:
+Clicking the entry tries these in order and reports which one worked in a short toast:
 
 1. **`app-window`** — a window created by the DSH desktop process itself (the desktop app is Electron). An already-open one is focused instead of duplicated.
 2. **`app-window-shell`** — a chromeless Edge/Chrome window (`--app=`) with its own `--user-data-dir` (`~/.dsh/dsh-webchat/app-window`), so its login stays separate from your everyday browser. Used when the host refuses (1).
@@ -41,9 +41,10 @@ dsh plugin --profile desktop add github:jaychang1989/dsh-webchat
 
 ## Use
 
-1. Click the "DeepSeek 网页 / DeepSeek Web" entry in the sidebar.
-2. Click "Open chat.deepseek.com" in the panel.
-3. Sign in once in the window it opens; afterwards just use the official web app.
+1. Click the "DeepSeek 网页 / DeepSeek Web" entry in the sidebar — the page opens directly, there is no second click.
+2. Sign in once in the window it opens; afterwards just use the official web app.
+
+A toast in the corner reports the outcome: `已打开 DeepSeek 网页` / `已交给系统默认浏览器打开` / a failure reason (an `HTTP 404` usually means the host half is still an older version — restart the desktop app).
 
 ## Difference from 0.3.x — this release deletes most of the plugin
 

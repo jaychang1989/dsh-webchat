@@ -3,8 +3,8 @@
  *
  * The client bundle only ever runs inside the GUI, so it is executed here
  * against a minimal DOM stand-in: enough to prove the module-loader contract,
- * that apply() mounts the sidebar entry and the panel view, and that the panel
- * button talks to the two host routes.
+ * that apply() mounts the sidebar entry, and that clicking that entry calls the
+ * host route and reports the outcome.
  */
 
 import { test } from 'node:test'
@@ -14,6 +14,8 @@ import { fileURLToPath } from 'node:url'
 import vm from 'node:vm'
 
 const BUNDLE = fileURLToPath(new URL('../lib/client.js', import.meta.url))
+const ENTRY = 'data-dsh-webchat-entry'
+const TOAST = 'data-dsh-webchat-toast'
 
 /** A DOM element stub covering exactly what lib/client.js touches. */
 function element(tagName, document) {
@@ -41,12 +43,14 @@ function element(tagName, document) {
       delete this.attributes[name]
     },
     appendChild(child) {
+      if (child.parentElement !== null) child.remove()
       child.parentElement = this
       child.isConnected = this.isConnected
       this.children.push(child)
       return child
     },
     insertBefore(child, anchor) {
+      if (child.parentElement !== null) child.remove()
       child.parentElement = this
       const index = anchor === null || anchor === undefined ? this.children.length : this.children.indexOf(anchor)
       this.children.splice(index < 0 ? this.children.length : index, 0, child)
@@ -72,7 +76,11 @@ function element(tagName, document) {
     matches() {
       return false
     },
-    querySelector() {
+    querySelector(selector) {
+      if (selector.includes('data-part')) {
+        return this.children.find(child => child.getAttribute('data-part') !== null
+          && selector.includes(child.getAttribute('data-part'))) ?? null
+      }
       return null
     },
     querySelectorAll() {
@@ -83,7 +91,7 @@ function element(tagName, document) {
     },
     dispatch(type, event) {
       const handler = this.listeners[type]
-      if (handler !== undefined) handler(event)
+      return handler === undefined ? undefined : handler(event)
     },
     get nextElementSibling() {
       if (this.parentElement === null) return null
@@ -99,9 +107,9 @@ function element(tagName, document) {
 }
 
 /**
- * Build the document stub, with a sidebar column (logo row + new-session
+ * Build the document stub with a sidebar column (logo row + new-session
  * button) and a conversation column already in place.
- * @returns the stub document plus the element it created.
+ * @returns the stub document.
  */
 function makeDocument() {
   const document = { created: [] }
@@ -112,7 +120,6 @@ function makeDocument() {
   const body = element('body', document)
   const html = element('html', document)
 
-  // Sidebar column: column > logoRowOwner > logoRow > button[class*=newSession]
   const sidebarColumn = element('div', document)
   sidebarColumn.setAttribute('data-pane', 'sidebar')
   const sidebarRootEl = element('div', document)
@@ -130,7 +137,6 @@ function makeDocument() {
   const conversation = element('div', document)
   conversation.setAttribute('data-pane', 'conversation')
 
-  const styleTags = []
   document.head = head
   document.body = body
   document.documentElement = html
@@ -138,126 +144,142 @@ function makeDocument() {
   document.querySelector = (selector) => {
     if (selector.includes('sidebar')) return sidebarColumn
     if (selector.includes('conversation') || selector.includes('centerCol')) return conversation
-    if (selector === '[data-dsh-webchat-entry]') return document.created.find((el) => el.getAttribute('data-dsh-webchat-entry') !== null) ?? null
+    if (selector.includes('toast')) return document.created.find((el) => el.getAttribute(TOAST) !== null && el.isConnected) ?? null
+    if (selector.includes('entry')) return document.created.find((el) => el.getAttribute(ENTRY) !== null) ?? null
     return null
   }
   document.querySelectorAll = () => []
   document.addEventListener = () => {}
   document.removeEventListener = () => {}
   document.dispatchEvent = () => {}
-  document._styleTags = styleTags
   document._sidebarRoot = sidebarRootEl
   document._conversation = conversation
-  document._newSession = newSession
   return document
 }
 
-/** Load the bundle with a fresh realm-ish global set; returns the loader rows. */
+/** Load the bundle with a fresh global set; returns the loader rows. */
 function loadBundle(document, fetchImpl) {
   const rows = []
+  const pending = []
   const sandbox = {
     window: { __ModuleLoader__: { load: (row) => rows.push(row) } },
     document,
     navigator: { language: 'zh-CN' },
     console: { warn() {}, log() {}, error() {} },
-    fetch: fetchImpl ?? (async () => ({ ok: true, status: 200, json: async () => ({ ok: true, appWindowOpen: false, last: {} }) })),
-    CustomEvent: class { constructor(type, init) { this.type = type; this.detail = init?.detail } },
+    fetch: fetchImpl ?? (async () => ({ ok: true, status: 200, json: async () => ({ ok: true, via: 'app-window' }) })),
     MutationObserver: class {
       observe() {}
       disconnect() {}
     },
-    setTimeout,
-    clearTimeout,
+    // Record the dismissal without letting a live timer outlive the test.
+    setTimeout: (fn) => { pending.push(fn); return 0 },
+    clearTimeout: () => {},
   }
+  sandbox._pending = pending
   const context = vm.createContext(sandbox)
   vm.runInContext(readFileSync(BUNDLE, 'utf8'), context, { filename: 'client.js' })
-  return rows
+  return { rows, sandbox }
+}
+
+/** Mount the plugin and return its sidebar entry. */
+function mount(document, fetchImpl) {
+  const { rows, sandbox } = loadBundle(document, fetchImpl)
+  const plugin = rows[0].factory()
+  plugin.apply({ effect: (fn) => { const off = fn(); return () => { if (typeof off === 'function') off() } } })
+  const entry = document.created.find((el) => el.getAttribute(ENTRY) !== null)
+  return { plugin, sandbox, entry }
+}
+
+/** Let the click handler's awaits settle. */
+async function settle() {
+  for (let i = 0; i < 4; i++) await new Promise((resolve) => setImmediate(resolve))
 }
 
 test('the bundle registers under the package name', () => {
   const document = makeDocument()
-  const rows = loadBundle(document)
+  const { rows } = loadBundle(document)
 
   assert.equal(rows.length, 1)
   assert.equal(rows[0].id, '@jaychang1989/dsh-webchat')
   assert.equal(typeof rows[0].factory, 'function')
 })
 
-test('apply mounts the sidebar entry and the panel view', () => {
+test('apply mounts the sidebar entry and nothing else', () => {
   const document = makeDocument()
-  const rows = loadBundle(document)
-  const plugin = rows[0].factory()
+  const { plugin, entry } = mount(document)
 
   assert.equal(typeof plugin.apply, 'function')
   // Cross-realm array: compare contents, not prototypes.
   assert.deepEqual([...plugin.inject], [])
 
-  let disposed = 0
-  plugin.apply({ effect: (fn) => { const off = fn(); return () => { disposed++; if (typeof off === 'function') off() } } })
-
-  const entry = document.created.find((el) => el.getAttribute('data-dsh-webchat-entry') !== null)
   assert.ok(entry !== undefined, 'sidebar entry was not created')
   assert.equal(entry.tagName, 'BUTTON')
   assert.equal(entry.getAttribute('data-dsh-plugin'), 'webchat')
   assert.equal(entry.getAttribute('aria-label'), 'DeepSeek 网页')
   assert.equal(entry.parentElement, document._sidebarRoot)
+  assert.ok(document.getElementById('dsh-webchat-style') !== null, 'stylesheet was not injected')
 
-  const view = document._conversation.children.find((el) => el.getAttribute('data-dsh-webchat-view') !== null)
-  assert.ok(view !== undefined, 'panel view was not appended to the center column')
-
-  const style = document.getElementById('dsh-webchat-style')
-  assert.ok(style !== null, 'stylesheet was not injected')
-
-  const button = view.children[0].children[1].children.find((el) => el.className === 'dsh-wc-button')
-  assert.ok(button !== undefined, 'panel button was not created')
-  assert.equal(button.textContent, '打开 chat.deepseek.com')
+  // No panel: the whole point of 0.4.x is that the page lives in a window.
+  assert.equal(document._conversation.children.length, 0)
+  assert.equal(document.created.filter(el => el.getAttribute('data-dsh-webchat-view') !== null).length, 0)
 })
 
-test('the panel button posts to the open route and reports the strategy', async () => {
+test('clicking the entry opens the page and confirms it', async () => {
   const document = makeDocument()
   const calls = []
-  const fetchImpl = async (path, init) => {
+  const { entry } = mount(document, async (path, init) => {
     calls.push({ path, method: init?.method ?? 'GET' })
-    if (path.endsWith('/state')) return { ok: true, status: 200, json: async () => ({ ok: true, appWindowOpen: false, last: {} }) }
     return { ok: true, status: 200, json: async () => ({ ok: true, via: 'app-window' }) }
-  }
-  const rows = loadBundle(document, fetchImpl)
-  const plugin = rows[0].factory()
-  plugin.apply({ effect: (fn) => fn() })
+  })
 
-  const view = document._conversation.children[0]
-  const card = view.children[0].children[1]
-  const button = card.children.find((el) => el.className === 'dsh-wc-button')
-  const result = card.children.find((el) => el.className === 'dsh-wc-result')
+  await entry.dispatch('click', { target: null })
+  await settle()
 
-  await button.dispatch('click', { target: null })
-  // The click handler is async and awaits two fetches.
-  await new Promise((resolve) => setImmediate(resolve))
-  await new Promise((resolve) => setImmediate(resolve))
-
-  assert.deepEqual(calls.map((call) => call.method), ['GET', 'POST', 'GET'])
-  assert.equal(calls[1].path, '/api/dsh-webchat/open')
-  assert.match(result.textContent, /已打开应用窗口/)
+  assert.deepEqual(calls, [{ path: '/api/dsh-webchat/open', method: 'POST' }])
+  const toast = document.created.find(el => el.getAttribute(TOAST) !== null && el.isConnected)
+  assert.ok(toast !== undefined, 'no confirmation toast')
+  assert.equal(toast.textContent, '已打开 DeepSeek 网页')
+  assert.equal(entry.disabled, false)
+  assert.equal(entry.querySelector('[data-part=label]').textContent, 'DeepSeek 网页')
 })
 
-test('a refused open is reported as a failure', async () => {
+test('a system-browser handoff says so', async () => {
   const document = makeDocument()
-  const fetchImpl = async (path) => {
-    if (path.endsWith('/state')) return { ok: true, status: 200, json: async () => ({ ok: true, appWindowOpen: false, last: {} }) }
-    return { ok: false, status: 502, json: async () => ({ ok: false, via: 'system-browser', error: 'no way to open the page' }) }
-  }
-  const rows = loadBundle(document, fetchImpl)
-  const plugin = rows[0].factory()
-  plugin.apply({ effect: (fn) => fn() })
+  const { entry } = mount(document, async () => ({
+    ok: true, status: 200, json: async () => ({ ok: true, via: 'system-browser' }),
+  }))
 
-  const card = document._conversation.children[0].children[0].children[1]
-  const button = card.children.find((el) => el.className === 'dsh-wc-button')
-  const result = card.children.find((el) => el.className === 'dsh-wc-result')
+  await entry.dispatch('click', { target: null })
+  await settle()
 
-  await button.dispatch('click', { target: null })
-  await new Promise((resolve) => setImmediate(resolve))
-  await new Promise((resolve) => setImmediate(resolve))
+  const toast = document.created.find(el => el.getAttribute(TOAST) !== null && el.isConnected)
+  assert.equal(toast.textContent, '已交给系统默认浏览器打开')
+})
 
-  assert.equal(result.getAttribute('data-state'), 'bad')
-  assert.match(result.textContent, /no way to open the page/)
+test('a refused open reports the failure', async () => {
+  const document = makeDocument()
+  const { entry } = mount(document, async () => ({
+    ok: false, status: 502, json: async () => ({ ok: false, via: 'system-browser', error: 'no way to open the page' }),
+  }))
+
+  await entry.dispatch('click', { target: null })
+  await settle()
+
+  const toast = document.created.find(el => el.getAttribute(TOAST) !== null && el.isConnected)
+  assert.equal(toast.getAttribute('data-state'), 'bad')
+  assert.match(toast.textContent, /no way to open the page/)
+})
+
+test('a 404 from an older host half is surfaced, not swallowed', async () => {
+  const document = makeDocument()
+  const { entry } = mount(document, async () => ({
+    ok: false, status: 404, json: async () => { throw new Error('not json') },
+  }))
+
+  await entry.dispatch('click', { target: null })
+  await settle()
+
+  const toast = document.created.find(el => el.getAttribute(TOAST) !== null && el.isConnected)
+  assert.equal(toast.getAttribute('data-state'), 'bad')
+  assert.match(toast.textContent, /HTTP 404/)
 })

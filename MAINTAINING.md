@@ -25,7 +25,7 @@ and no toolchain. The package therefore has **zero runtime dependencies**.
 
 ```
 lib/index.js        host half  — two routes + the window strategies
-lib/client.js       browser half — sidebar entry + panel, plain DOM
+lib/client.js       browser half — the sidebar entry and its toast, plain DOM
 cordis.patch.yml    the profile row
 test/*.test.mjs     node --test
 ```
@@ -81,23 +81,27 @@ encoded; the `/api/dsh-webchat` paths, the `dsh-webchat` locale label and the
 `data-dsh-webchat-*` attributes are the plugin's own identity and do not follow
 it.
 
-The shell exposes no slot an external plugin can register into, so both surfaces
-are injected at the DOM level and self-heal against React re-renders:
+The shell exposes no slot an external plugin can register into, so the entry
+row is injected at the DOM level and self-heals against React re-renders:
 
 - **Sidebar entry** — a `<button data-dsh-webchat-entry>` placed after the New
   Session row inside the sidebar root (`[data-pane="sidebar"], [class*="sidebarCol"]`),
   with a body-level `MutationObserver` to notice a rebuilt pane and a root-level
   one to re-insert the row when React displaces it.
-- **Panel view** — a `<div data-dsh-webchat-view>` appended to
-  `[data-pane="conversation"], [class*="centerCol"]`, shown by an
-  `<html data-dsh-webchat-active>` attribute. The injected stylesheet also hides
-  the column's other children while it is active, and opening the panel evicts
-  sibling takeover panels (`data-dsh-taskboard-active`, `data-dsh-ssh-active`)
-  plus the shared `dsh-panel-activate` event.
+- **Clicking it** POSTs `/api/dsh-webchat/open` and shows the outcome in a
+  `<div data-dsh-webchat-toast>` that removes itself (three seconds, eight on
+  failure). The entry disables itself and swaps its label to a busy string while
+  the request is in flight, so a slow strategy cannot be double-clicked.
+
+There is deliberately **no panel**: the page cannot live in this window, so a
+panel would only be a picture of a button. The old center-column takeover (the
+`data-dsh-webchat-active` attribute, the injected hide rules for the column's
+other children, and the `dsh-panel-activate` arbitration against the task board
+and ssh panels) went with it in 0.4.1.
 
 The stylesheet is injected as one `<style id="dsh-webchat-style">` built from the
 `CSS` array in `lib/client.js`; it rides the shell's `--dsw-*` tokens so the
-panel follows the active theme.
+entry and the toast follow the active theme.
 
 ## Testing
 
@@ -105,12 +109,13 @@ panel follows the active theme.
 node --test
 ```
 
-Eleven cases: the host half is driven with a fake context and fake
+Thirteen cases: the host half is driven with a fake context and fake
 request/response objects (routes, method guards, strategy selection), and the
 browser half is executed with `vm` against a minimal DOM stand-in
 (`test/client.test.mjs`) that covers exactly the calls the bundle makes — enough
-to prove it mounts the entry and the panel, and that the button posts to the
-right route and reports the outcome.
+to prove it mounts the entry, that clicking it posts to the right route, and
+that success, handoff and failure (including a bare `HTTP 404` from an older host
+half) each reach the toast instead of being swallowed.
 
 ## Not verifiable from outside the app
 
