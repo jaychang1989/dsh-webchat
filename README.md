@@ -15,11 +15,19 @@ Codex-ChatGPT-mode style web chat for [DeepSeek Harness](https://github.com/deep
 
 ## Install
 
+From npm (prebuilt — no build step, no `allowBuilds` approval):
+
+```bash
+dsh plugin --profile desktop add @jaychang1989/dsh-webchat
+```
+
+Or straight from this repository (also prebuilt, `lib/` is committed):
+
 ```bash
 dsh plugin --profile desktop add github:jaychang1989/dsh-webchat
 ```
 
-> The compiled `lib/` is committed, so a git install needs no build step.
+> The npm package is scoped because the unscoped `dsh-webchat` name belongs to the unmaintained upstream project. The plugin's own identity is unchanged by the scope: the entry id stays `webchat`, and so do the `/api/dsh-webchat` routes, the data directory and the locale namespace.
 
 **Switching from upstream:** both packages insert the same `id: webchat` row, and one profile cannot hold the same entry id twice — boot fails on the duplicate. Remove the upstream package first (the Plugin Manager UI, or `dsh plugin --profile desktop remove dsh-webchat`), then add this one.
 

@@ -114,12 +114,33 @@ which is what upstream used) is the obvious next improvement.
 ## Testing a change
 
 ```bash
+# unit tests: activation + the transfer handle paths against a fake backend
+node --test
+
 # import/link check against a real harness install
-node -e "import('dsh-webchat').then(m => console.log(Object.keys(m)))"
+node -e "import('@jaychang1989/dsh-webchat').then(m => console.log(Object.keys(m)))"
 ```
 
 then reinstall into a profile and restart the app:
 
 ```bash
-dsh plugin --profile desktop add github:jaychang1989/dsh-webchat
+dsh plugin --profile desktop add @jaychang1989/dsh-webchat     # npm
+dsh plugin --profile desktop add github:jaychang1989/dsh-webchat  # or from git
 ```
+
+## Renaming rules
+
+The package name is read in exactly three places that must stay in step — the
+manifest `name`, the `name` of the row in `cordis.patch.yml`, and the `id` in
+the `window.__ModuleLoader__.load({...})` header of the emitted `lib/client.js`
+(dsh-client-modules keys every browser row by the package name, and the bundle
+registers its factory under the same id). Everything else that reads
+`dsh-webchat` — `/api/dsh-webchat/*` routes, the `~/.dsh/dsh-webchat` data dir,
+the `dsh-webchat` locale namespace, `data-dsh-webchat-*` attributes and the
+effect labels — is the plugin's own identity and deliberately does not follow
+the npm coordinate.
+
+The npm package is scoped (`@jaychang1989/dsh-webchat`) because the unscoped
+name belongs to the upstream project; `publishConfig.access: public` is what
+makes a scoped package publish publicly rather than as a paid private one.
+

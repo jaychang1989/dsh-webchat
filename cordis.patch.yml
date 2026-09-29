@@ -2,18 +2,21 @@
 # roster. Applied as a profile bundle layer (the `dsh.bundle.patch` manifest
 # field) over dsh-base; activate by adding this package to the profile's
 # `dsh.profile.bundles`, or with
+#   dsh plugin --profile <name> add @jaychang1989/dsh-webchat
 #   dsh plugin --profile <name> add github:jaychang1989/dsh-webchat
 #
 # The row is a bare plugin by package name: the node half (exports ".") runs in
 # the host process (DeepSeek web browser engine, /api/dsh-webchat routes, agent
 # tools), and the `dsh.client` declaration in package.json makes the browser
 # half (exports "./client", served at /plugins/<id>/client.js) load in the web
-# GUI. `id` is the profile entry id; dsh >= 0.1.7 also uses it as the settings
-# form namespace, so keep it stable.
+# GUI. `name` must be this package's manifest name verbatim (scoped names
+# included) — dsh-client-modules keys every browser row by it, and lib/client.js
+# registers its factory under the same id. `id` is the profile entry id; dsh >=
+# 0.1.7 also uses it as the settings form namespace, so keep it stable.
 #
 # Note: the upstream package xmuwenxiang/dsh-web-chat inserts the same
 # `id: webchat`. Do not keep both installed in one profile — a duplicate entry
 # id is rejected at boot.
 - insert:
     - id: webchat
-      name: 'dsh-webchat'
+      name: '@jaychang1989/dsh-webchat'

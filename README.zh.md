@@ -15,11 +15,19 @@
 
 ## 安装
 
+从 npm 安装（预构建产物，免构建、免 `allowBuilds` 授权）：
+
+```bash
+dsh plugin --profile desktop add @jaychang1989/dsh-webchat
+```
+
+或直接从本仓库安装（同样是预构建，`lib/` 已提交）：
+
 ```bash
 dsh plugin --profile desktop add github:jaychang1989/dsh-webchat
 ```
 
-> 仓库已提交编译产物 `lib/`，从 git 安装无需额外构建。
+> npm 包名带 scope，是因为不带 scope 的 `dsh-webchat` 属于已停止维护的上游项目。scope 不影响插件自身身份：entry id 仍是 `webchat`，`/api/dsh-webchat` 路由、数据目录与 locale 命名空间也都不变。
 
 **从上游切换过来时**：上游包与本包都插入 `id: webchat` 这一行，同一个 profile 里同时存在会因 entry id 重复而在启动时报错。请先移除上游包：
 
