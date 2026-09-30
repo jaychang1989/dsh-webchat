@@ -124,7 +124,3 @@ node --test
 - **宿主半区能否真的拿到 Electron**（决定登录态能否保存）也只能在真实进程里验证：`GET /api/dsh-webchat/state` 的 `session.electron` 就是它的自检结果；测试用的是注入替身。
 - 登录态能否真正恢复，最终取决于 DeepSeek 把会话放在哪里：cookie（本插件能完整搬运，含 HttpOnly）与 localStorage（通用搬运）。若它改用其它存储，需要重新登录一次。
 - 页面是否还会弹「使用环境异常」，取决于站点的检查逻辑，同样以真实页面为准。
-
-## 来源
-
-本包最初由 `xmuwenxiang/dsh-web-chat` 分叉而来。至今沿用的部分是插件骨架（双半区打包、`cordis.patch.yml` 行、客户端 bundle 形式）与最早的侧边栏入口注入思路；现在插件所做的全部事情——槽位注册、常驻访客面板、窗口降级链、UA 处理——都是在这里写的。Apache-2.0 要求的署名见 `NOTICE`。
