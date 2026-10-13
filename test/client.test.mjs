@@ -94,7 +94,7 @@ function element(tagName, document) {
     /** Electron's <webview> script evaluation, used for site storage. */
     executeJavaScript(code) {
       this.scripts.push(code)
-      return Promise.resolve(this.reply ?? '[]')
+      return Promise.resolve(code.includes('var state =') ? true : this.reply ?? '[]')
     },
     reload() {
       this.reloads += 1
@@ -254,6 +254,7 @@ function loadBundle(document, options = {}) {
       disconnect() {}
     },
     observed: [],
+    URL,
     require: (name) => {
       if (name === 'react') return fakeReact.React
       throw new Error('unexpected require: ' + name)
@@ -267,6 +268,7 @@ function loadBundle(document, options = {}) {
         return { lease: 'lease-1', partition: 'dsh-sidebar-browser-test' }
       },
       release: async (lease) => { guestCalls.released.push(lease) },
+      onOpenRequested: () => () => {},
     }
   if (bridge !== undefined) sandbox.dshDesktop = { protocolVersion: 1, browser: bridge }
   const context = vm.createContext(sandbox)
@@ -281,6 +283,12 @@ function loadPlugin(document, options) {
   const registrations = []
   const effects = []
   const ctx = {
+    shortcuts: {
+      platform: 'windows',
+      commands: [], observers: [],
+      register(command) { this.commands.push(command); return () => { this.commands = this.commands.filter((item) => item !== command) } },
+      observeFixedInput(fn) { this.observers.push(fn); return () => { this.observers = this.observers.filter((item) => item !== fn) } },
+    },
     slots: {
       inject(ownerKey, callback) {
         callback()
@@ -311,7 +319,7 @@ test('the bundle registers under the package name and asks for slots', () => {
 
   assert.equal(rows.length, 1)
   assert.equal(rows[0].id, '@jaychang1989/dsh-webchat')
-  assert.deepEqual([...plugin.inject], ['slots'])
+  assert.deepEqual([...plugin.inject], ['slots', 'shortcuts'])
   assert.equal(typeof plugin.apply, 'function')
 })
 
@@ -539,7 +547,7 @@ test('a fresh run without a snapshot never reloads the page', async () => {
   await settle()
 
   assert.equal(frame.reloads, 0)
-  assert.equal(frame.scripts.length, 2, 'the storage read for the snapshot plus the link-patch injection')
+  assert.equal(frame.scripts.length, 1, 'only the origin-checked snapshot read runs')
 })
 
 test('the session is snapshotted as the page is used', async () => {
@@ -552,7 +560,7 @@ test('the session is snapshotted as the page is used', async () => {
   await settle()
 
   const frame = document.created.find((el) => el.tagName === 'WEBVIEW')
-  frame.reply = JSON.stringify({ storage: [['userToken', 'secret']], cookie: 'ds_session=abc' })
+  frame.reply = JSON.stringify({ origin: PAGE_URL.slice(0, -1), storage: [['userToken', 'secret']], cookie: 'ds_session=abc' })
   frame.dispatch('dom-ready', {})
   await settle()
   frame.dispatch('did-finish-load', {})
@@ -580,6 +588,8 @@ test('unload snapshots the session without shipping storage', async () => {
   rendered.mount(element('div', document))
   await settle()
 
+  document.created.find((el) => el.tagName === 'WEBVIEW').dispatch('did-finish-load', {})
+  await settle()
   const handlers = sandbox.window.listeners.beforeunload ?? []
   assert.equal(handlers.length, 1, 'the unload beacon must be installed')
   handlers[0]({})
@@ -598,8 +608,10 @@ test('plugin disposal snapshots once more and stops the timer', async () => {
   rendered.mount(element('div', document))
   await settle()
   const frame = document.created.find((el) => el.tagName === 'WEBVIEW')
-  frame.reply = JSON.stringify({ storage: [['userToken', 'secret']], cookie: 'ds_session=abc' })
+  frame.reply = JSON.stringify({ origin: PAGE_URL.slice(0, -1), storage: [['userToken', 'secret']], cookie: 'ds_session=abc' })
 
+  frame.dispatch('did-finish-load', {})
+  await settle()
   const cleanups = effects.map((fn) => fn()).filter((fn) => typeof fn === 'function')
   cleanups.forEach((fn) => fn())
   await settle()
@@ -671,7 +683,7 @@ test('snapshot script excludes WAF state and keeps login state', async () => {
   await settle()
   const localStorage = { userToken: 'login', aws_waf_token: 'stale', AWSWAFState: 'stale' }
   Object.defineProperty(localStorage, 'getItem', { value: (key) => localStorage[key] })
-  const state = JSON.parse(vm.runInNewContext(frame.scripts[0], { localStorage, document: { cookie: 'ds_session=abc;aws-waf-token=stale; theme=dark' } }))
+  const state = JSON.parse(vm.runInNewContext(frame.scripts[0], { location: { origin: PAGE_URL.slice(0, -1) }, localStorage, document: { cookie: 'ds_session=abc;aws-waf-token=stale; theme=dark' } }))
   assert.deepEqual(state.storage, [['userToken', 'login']])
   assert.equal(state.cookie, 'ds_session=abc; theme=dark')
 })
@@ -689,7 +701,7 @@ test('restore skips old WAF storage and accepts imported cookies without Electro
   await settle()
   const written = [], cookies = [], page = {}
   Object.defineProperty(page, 'cookie', { set: (value) => cookies.push(value) })
-  vm.runInNewContext(frame.scripts[0], { localStorage: { setItem: (...pair) => written.push(pair) }, document: page })
+  vm.runInNewContext(frame.scripts[0], { location: { origin: PAGE_URL.slice(0, -1) }, localStorage: { setItem: (...pair) => written.push(pair) }, document: page })
   assert.deepEqual(written, [['userToken', 'login']])
   assert.deepEqual(cookies, ['ds_session=abc; path=/', 'aws-waf-token=imported; path=/'])
   assert.equal(frame.reloads, 1)
@@ -708,85 +720,56 @@ test('re-applying the plugin rewrites the injected stylesheet', () => {
 
 
 
-test('the guest installs the external-link patch on every load', async () => {
+test('native popup requests open http(s) links and are disposed exactly once', async () => {
+  const document = makeDocument()
+  let callback, unsubscribed = 0
+  const { plugin, ctx, registrations, react, requests, effects } = loadPlugin(document, { bridge: {
+    acquire: async () => ({ lease: 'lease-1', partition: 'dsh-sidebar-browser-test' }),
+    release: async () => {},
+    onOpenRequested(lease, fn) { assert.equal(lease, 'lease-1'); callback = fn; return () => { unsubscribed++ } },
+  } })
+  plugin.apply(ctx)
+  react.render(registrations[1].component).mount(element('div', document))
+  await settle()
+  assert.equal(typeof callback, 'function')
+  for (const url of ['https://ext.example/p?a=1&b=2', 'https://chat.deepseek.com/x']) callback(url)
+  for (const url of ['javascript:alert(1)', 'file:///tmp/file', 'not a url']) callback(url)
+  await settle()
+  const opens = requests.filter((r) => r.path.endsWith('/external'))
+  assert.deepEqual(opens.map((r) => r.body.url), ['https://ext.example/p?a=1&b=2', 'https://chat.deepseek.com/x'])
+  const frame = document.created.find((el) => el.tagName === 'WEBVIEW')
+  frame.dispatch('console-message', { message: '__dsh-webchat-open:https://spoof.example/' })
+  await settle()
+  assert.equal(requests.filter((r) => r.path.endsWith('/external')).length, 2)
+  effects.map((fn) => fn()).filter((fn) => typeof fn === 'function').forEach((fn) => { fn(); fn() })
+  assert.equal(unsubscribed, 1)
+})
+
+test('refresh commands use the native registry and only reload the selected guest', async () => {
   const document = makeDocument()
   const { plugin, ctx, registrations, react } = loadPlugin(document)
   plugin.apply(ctx)
-  react.render(registrations[1].component).mount(element('div', document))
+  const unmount = react.render(registrations[1].component).mount(element('div', document))
   await settle()
   const frame = document.created.find((el) => el.tagName === 'WEBVIEW')
-  frame.dispatch('did-finish-load', {})
-  await settle()
-
-  const patch = frame.scripts.find((code) => code.includes('__dshWebchatLinkPatch'))
-  assert.ok(patch !== undefined, 'the click patch must be injected on load')
-  assert.match(patch, /closest\('a\[href\]'\)/)
-  frame.dispatch('did-finish-load', {})
-  await settle()
-  assert.equal(frame.scripts.filter((code) => code.includes('__dshWebchatLinkPatch')).length, 2, 'the patch re-installs after a reload')
-})
-
-test('the link patch only hijacks external _blank anchors', async () => {
-  const document = makeDocument()
-  const { plugin, ctx, registrations, react } = loadPlugin(document)
-  plugin.apply(ctx)
-  react.render(registrations[1].component).mount(element('div', document))
-  await settle()
-  const frame = document.created.find((el) => el.tagName === 'WEBVIEW')
-  frame.dispatch('did-finish-load', {})
-  await settle()
-  const patch = frame.scripts.find((code) => code.includes('__dshWebchatLinkPatch'))
-
-  let handler = null
-  const anchor = (target, href, hostname) => ({ target, href, hostname, closest: function () { return this } })
-  const sandbox = {
-    window: {},
-    location: { hostname: 'chat.deepseek.com' },
-    document: { addEventListener: (type, fn) => { handler = fn } },
-    console: { warn: () => {} },
+  assert.equal(frame.getAttribute('data-sidebar-browser-frame'), '')
+  assert.equal(ctx.shortcuts.commands.length, 2)
+  const commands = [...ctx.shortcuts.commands]
+  assert.deepEqual(JSON.parse(JSON.stringify(commands.map((c) => c.defaults['desktop:windows']))), [{ code: 'F5', modifiers: [] }, { code: 'KeyR', modifiers: ['primary'] }])
+  for (const command of commands) {
+    const resolved = command.resolve({ source: 'webview', region: 'page', modal: null, target: frame })
+    assert.equal(resolved.status, 'handled')
+    resolved.run()
+    assert.equal(command.resolve({ region: 'page', modal: 'dialog' }).status, 'pass')
+    assert.equal(command.resolve({ region: 'terminal', modal: null }).status, 'pass')
   }
-  const result = vm.runInNewContext(patch, sandbox)
-  assert.equal(result, true)
-  assert.equal(typeof handler, 'function')
-
-  const click = (a) => {
-    const event = { target: a, prevented: false, stopped: false, preventDefault() { this.prevented = true }, stopPropagation() { this.stopped = true } }
-    handler(event)
-    return event
-  }
-  const external = click(anchor('_blank', 'https://ext.example/p?a=1&b=2', 'ext.example'))
-  assert.equal(external.prevented, true, 'an external _blank click is hijacked')
-  assert.equal(external.stopped, true)
-
-  const sameTab = click(anchor('', 'https://ext.example/other', 'ext.example'))
-  assert.equal(sameTab.prevented, false, 'a same-tab link keeps navigating the guest')
-
-  const ownSite = click(anchor('_blank', 'https://chat.deepseek.com/x', 'chat.deepseek.com'))
-  assert.equal(ownSite.prevented, false, "a link on the site itself keeps its popup")
-
-  const notAnAnchor = click({ closest: () => null })
-  assert.equal(notAnAnchor.prevented, false, 'a click outside any anchor is untouched')
+  assert.equal(frame.reloads, 2)
+  assert.equal(document.created.some((el) => el.className === 'dsh-wc-refresh'), false)
+  unmount.forEach((fn) => fn())
+  assert.equal(ctx.shortcuts.commands.length, 0)
+  assert.equal(commands[0].resolve({ region: 'page', modal: null }).status, 'pass')
+  assert.equal(frame.reloads, 2)
 })
-
-test('an external _blank link is handed to the host route', async () => {
-  const document = makeDocument()
-  const { plugin, ctx, registrations, requests, react } = loadPlugin(document)
-  plugin.apply(ctx)
-  react.render(registrations[1].component).mount(element('div', document))
-  await settle()
-  const frame = document.created.find((el) => el.tagName === 'WEBVIEW')
-
-  frame.dispatch('console-message', { message: 'an ordinary console line' })
-  await settle()
-  assert.equal(requests.some((entry) => entry.path === '/api/dsh-webchat/external'), false, 'noise must not open anything')
-
-  frame.dispatch('console-message', { message: '__dsh-webchat-open:https://ext.example/p?a=1&b=2' })
-  await settle()
-  const opens = requests.filter((entry) => entry.path === '/api/dsh-webchat/external')
-  assert.equal(opens.length, 1, 'only the sentinel message opens')
-  assert.equal(opens[0].body.url, 'https://ext.example/p?a=1&b=2')
-})
-
 
 test('AUDIT: no periodic save while the login is still being restored', async () => {
   const document = makeDocument()
@@ -877,4 +860,21 @@ test('periodic saves stay blocked until the post-restore reload has finished', a
   frame.dispatch('did-finish-load', {})
   await settle()
   assert.equal(requests.filter((r) => r.path.endsWith('/session/save')).length, 1)
+})
+
+test('injected session scripts verify their own origin before accessing credentials', async () => {
+  const document = makeDocument()
+  const { plugin, ctx, registrations, react } = loadPlugin(document, { restoreStorage: [['userToken', 'saved-login']] })
+  plugin.apply(ctx)
+  react.render(registrations[1].component).mount(element('div', document))
+  await settle()
+  const frame = document.created.find((el) => el.tagName === 'WEBVIEW')
+  frame.dispatch('did-finish-load', {})
+  await settle()
+  const page = { location: { origin: 'https://accounts.google.com' } }
+  Object.defineProperty(page, 'localStorage', { get() { throw new Error('foreign storage accessed') } })
+  assert.equal(vm.runInNewContext(frame.scripts[0], page), false)
+  frame.dispatch('did-finish-load', {})
+  await settle()
+  assert.equal(vm.runInNewContext(frame.scripts[1], page), null)
 })

@@ -627,3 +627,32 @@ test('AUDIT: deleting the migrated snapshot must not sign the user back in', () 
     cleanup()
   }
 })
+
+test('partition capture and restore never carry cookies from OAuth sites', async () => {
+  const cookies = fakeCookies([
+    { name: 'login', value: 'ok', domain: '.deepseek.com' },
+    { name: 'googleLogin', value: 'foreign', domain: '.google.com' },
+    { name: 'deceptive', value: 'foreign', domain: 'deepseek.com.evil.example' },
+  ])
+  assert.deepEqual((await captureCookies(cookies)).map((c) => c.name), ['login'])
+  const restored = fakeCookies()
+  await restoreCookies(restored, { cookies: [
+    { name: 'login', value: 'ok', domain: '.deepseek.com' },
+    { name: 'googleLogin', value: 'foreign', domain: '.google.com' },
+  ] })
+  assert.deepEqual(restored.written.map((c) => c.name), ['login'])
+})
+
+test('a temporary Electron outage keeps previously captured DeepSeek cookies', async () => {
+  const { file, cleanup } = tempSnapshot()
+  setSessionFile(file)
+  setElectronLoader(async () => { throw new Error('Electron unavailable') })
+  try {
+    const login = { name: 'ds_session_id', value: 'login', domain: '.deepseek.com', httpOnly: true }
+    writeSnapshot(file, { cookies: [login], storage: [['userToken', 'login']], cookie: '' })
+    const { ctx, routes } = fakeContext()
+    apply(ctx)
+    await callRoute(routes, ROUTES.save, 'POST', { partition: 'dsh-sidebar-browser-11111111-2222-3333-4444-555555555555' })
+    assert.deepEqual(readSnapshot(file).cookies, [login])
+  } finally { setElectronLoader(null); setSessionFile(null); cleanup() }
+})

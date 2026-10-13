@@ -61,19 +61,17 @@ guest.container.style.display = alive ? "block" : "none"
 
 语言读取：`document.documentElement[lang]` 为准（标签 thunk 同一来源），`navigator.language` 只兜底；桌面端 shell 语言与渲染进程区域设置可能不一致，但暂无公开 API 可读 shell 语言。俄语分支随 #2 引入并保留。
 
-（#2 曾要求的刷新控件在 0.7.7 应仓库所有者要求撤除：访客重载改由用户自行触发——重启 DSH 即可。）
+## 刷新：使用宿主快捷键，不增加按钮（#2）
 
-## 回复里的外链为什么能打开了（#1）
+面板显示期间通过 `ctx.shortcuts.register()` 注册 F5 和 primary+R，桌面 Windows/Linux 为 Ctrl+R，macOS 为 Cmd+R；面板卸载时移除注册。动作仅刷新访客，不重载应用外层窗口，终端及弹窗上下文不触发。通过 `@deepseek-ai/dsh-client-shortcuts` 排定服务激活顺序，最低宿主版本改为 rc.2。
 
-访客的弹窗死在宿主的 will-attach 闸门上——只有宿主自己签发的租约才被放行——所以页面里 `target="_blank"` 的链接（回复的引用、来源）点下去毫无反应（issue #1）。渲染进程无法给 guest 挂 window-open 处理器，于是走一条三段管道：
+**不要用 observeFixedInput 实现网页内快捷键**：rc.2 的固定动作观察器只收到外层 DOM 事件，native.ts 的 webview 输入走 registry.dispatch。访客标记 `data-sidebar-browser-frame`，以通过 preload 和 native adapter 的焦点校验。正式命令也进入快捷键设置，可由用户调整。
 
-1. 每次 `did-finish-load` 向 guest 注入一段点击补丁（幂等，`__dshWebchatLinkPatch` 守卫）：`target="_blank"` 且解析后为 http(s)、又不是站点自己域名的链接 → `preventDefault()` 后 `console.warn('__dsh-webchat-open:<url>')`。同页链接、站点自身链接、非锚点点击一概不碰。
-2. `<webview>` 的 `console-message` 事件认出哨兵，把 URL POST 给 `POST /api/dsh-webchat/external`。
-3. 宿主只接受**绝对 http(s) URL**（`file:`、自定义协议、残缺串一律 400——该端点无鉴权，而「打开」是有副作用的动作），交给系统默认浏览器。
+## 回复里的外链（#1）
 
-Windows 上用 `rundll32 url.dll,FileProtocolHandler` 而不是 cmd 的 `start`：URL 里的 `&` 必须作为单个参数原样存活，`start` 会把未加引号的 `&` 当命令分隔符拆开。
+通过 `dshDesktop.browser.onOpenRequested(lease, callback)` 订阅宿主已拒绝的新窗口请求，包含普通新窗口链接、中键与 window.open；卸载访客时解除订阅。只接受 http(s)，通过 `/external` 交给系统默认浏览器。不再注入锚点点击补丁，也不监听网页可伪造的 console 哨兵。该能力在 rc.2 已公开，源码为 `apps/desktop/src/preload-browser.ts`、`browser-guests.ts`。
 
-不做的事：Electron 可达时理论上可以经 `webContents.fromId(id).setWindowOpenHandler()` 接管一切弹窗（包括非锚点的 `window.open`），但 rc.2 宿主拿不到 Electron，且该路径只能在真实桌面端验证——不猜。
+Windows 使用 `rundll32 url.dll,FileProtocolHandler`，使 URL 的 `&` 保持为单个参数。
 
 ## 登录态为什么由插件自己保存
 
@@ -92,7 +90,8 @@ Windows 上用 `rundll32 url.dll,FileProtocolHandler` 而不是 cmd 的 `start`�
 
 - **回灌 cookie 必须在首次导航之前**：拿到租约 → `POST /session/restore`（宿主把快照里的 cookie 写进本次的分区）→ 才 `loadURL`。这样页面的第一个请求就带着登录态。
 - **回灌存储与页面 cookie 只能在页面已在自身 origin 之后**：`dom-ready` → 导航 → `did-finish-load` 之后一次性写入，然后 `reload()` 一次；第二次 `did-finish-load` 不再刷新。写 cookie 时统一补 `; path=/`（`document.cookie` 读回来的串不带属性）。
-- **恢复期间禁止快照**：刚加载完的页面存储是空的，此时保存会把正在恢复的那份快照清空。所以用 `storageState`（`pending` → `restoring` → `done`）挡住保存，直到恢复落定。
+- **来源检查**：恢复和读取脚本在访客内校验 `location.origin`，宿主调用前后也校验访客 URL；只接受 `https://chat.deepseek.com`。分区 cookie 捕获与回灌仅允许 DeepSeek 域，OAuth 站点数据不入快照。
+- **恢复期间禁止快照**：刚加载完的页面存储是空的，此时保存会把正在恢复的那份快照清空。所以所有保存入口统一检查 `record.ready`；状态为 `pending` → `restoring` → `reloading` → `done`，必须等回灌后的刷新结束才放行。失败回到 pending；定时器、卸载 beacon 和 dispose 同样禁止保存。
 - **快照时机**：每次 `did-finish-load`、每 30 秒、窗口 `beforeunload`（`sendBeacon`，只带 partition，不带 storage/cookie）、以及插件 dispose 前最后一刻。
 
 路由语义：
@@ -100,13 +99,13 @@ Windows 上用 `rundll32 url.dll,FileProtocolHandler` 而不是 cmd 的 `start`�
 | 路由 | 语义 |
 | --- | --- |
 | `POST /session/restore` `{ partition }` | 校验 partition 形状（不符 → 400）→ 读快照 → 尝试把 cookie 写进该分区 → 返回 `{ ok, error, cookies, storage, cookie, savedAt }`。**没有快照也是 200**（`storage: null`）；**拿不到 Electron 只让 `ok:false` + `error`，storage/cookie 照常返回**——页面必须照常加载 |
-| `POST /external` `{ url }` | 只接受绝对 http(s) URL（其余 400）→ 交给系统默认浏览器 → `200 { via: 'system-browser' }`；打开器失败 500。服务 #1 的外链管道，见上节 |
+| `POST /external` `{ url }` | 只接受绝对 http(s) URL（其余 400）→ 交给系统默认浏览器 → `200 { via: 'system-browser' }`；打开器失败 500。服务 #1 的原生窗口请求，见上节 |
 | `POST /session/save` `{ partition, storage?, cookie? }` | 读该分区 cookie（能拿就拿）+ 传进来的 storage/cookie，原子写到快照，**永远返回 200**（`error` 里说明 cookie 为什么没拿到）。**不带 `storage`/`cookie` 时保留上一次的**——卸载时的 beacon 走的正是这条路 |
 
 安全边界（都要保持）：
 
 - partition 必须匹配 `/^dsh-sidebar-browser-[0-9a-f-]{8,}$/`，插件绝不触碰别的 session；
-- 快照写在 DSH 统一数据根下的 `dsh-webchat/session.json`（#4）。根与宿主同规则解析（`@deepseek-ai/dsh-home-paths`）：`DSH_HOME` 非空即根——数据直接在其下，**不再拼第二层 `.dsh`**——否则 `~/.dsh`，`~` 前缀展开，空白视为未设置。以 `0o600` 先写临时文件再 `rename`（崩溃不会截断）。升级时旧的 `~/.dsh` 快照会被**原样搬一次**：仅生产默认路径触发、新位置已有快照则不动、旧文件保留不删（删除用户数据不是插件的职权）、损坏或缺失的旧文件直接忽略。chromeless 窗口 profile 同根：`dsh-webchat/app-window`（旧版在 `$DSH_HOME` 下多拼了一层 `.dsh`；该 profile 不迁移，降级窗口需重新登录一次）；
+- 快照写在 DSH 统一数据根下的 `dsh-webchat/session.json`（#4）。根与宿主同规则解析（`@deepseek-ai/dsh-home-paths`）：`DSH_HOME` 非空即根——数据直接在其下，**不再拼第二层 `.dsh`**——否则 `~/.dsh`，`~` 前缀展开，空白视为未设置。以 `0o600` 先写临时文件再 `rename`（崩溃不会截断）。升级时旧的 `~/.dsh` 快照会被**原样搬一次**，通过同目录不含凭据的 `session.migrated` 标记防止删除新快照后重导旧登录：仅生产默认路径触发、新位置已有快照则不动、旧文件保留不删（删除用户数据不是插件的职权）、损坏或缺失的旧文件直接忽略。chromeless 窗口 profile 同根：`dsh-webchat/app-window`（旧版在 `$DSH_HOME` 下多拼了一层 `.dsh`；该 profile 不迁移，降级窗口需重新登录一次）；
 - 内容是**明文凭据**：`GET /state` 只报**数量**，绝不回显 cookie 值——那个端点没有鉴权。
 
 四个测试缝只在测试里使用：`setSessionFile(path)`、`setLegacySessionFile(path)`、`setExternalOpener(fn)` 与 `setElectronLoader(fn)`（生产路径不设置，走真实实现）。
@@ -138,7 +137,7 @@ test/*.test.mjs    node --test
 node --test
 ```
 
-46 个用例。宿主半区用假 context、假 request/response 与**可注入的 Electron/cookie 替身**驱动：快照落盘往返、cookie 捕获与回灌（含 HttpOnly、拒绝一个不合法 cookie 不影响其余、缺 name/domain 的条目跳过）、两条会话路由的方法守卫与分区校验、"没有快照"是成功而非失败、拿不到 Electron 时如实报错且不影响页面、`DSH_HOME` 解析（非空即根、空白视为未设置、`~` 展开）与旧 `~/.dsh` 快照的一次性搬运（不覆盖新位置已有的数据）。浏览器半区用一层薄的 React 测试替身（`createElement`/`useRef`/`useEffect`）+ DOM 桩**真实执行**：槽位注册契约（同一个 id、order、label thunk、按 `size` 出图标）、租约与 webview 属性、UA 只删 Electron token（干净 UA 原样通过、无 UA 不写入）、**卸载只隐藏不摘除、重挂复用同一访客、只申请一次租约**、会话恢复只写一次存储并只刷新一次（且恢复期间不快照）、使用中/卸载前的快照与定时器清理，以及无桥接时的降级与失败提示。重挂时重写样式表、俄语文案，以及外链补丁（只劫持解析后为 http(s) 的外部 `_blank` 链接，站点自身与同页链接不碰；哨兵经 `console-message` 转发到 `/external`）。
+55 个用例。宿主半区用假 context、假 request/response 与**可注入的 Electron/cookie 替身**驱动：快照落盘往返、cookie 捕获与回灌（含 HttpOnly、拒绝一个不合法 cookie 不影响其余、缺 name/domain 的条目跳过）、两条会话路由的方法守卫与分区校验、"没有快照"是成功而非失败、拿不到 Electron 时如实报错且不影响页面、`DSH_HOME` 解析（非空即根、空白视为未设置、`~` 展开）与旧 `~/.dsh` 快照的一次性搬运（不覆盖新位置已有的数据）。浏览器半区用一层薄的 React 测试替身（`createElement`/`useRef`/`useEffect`）+ DOM 桩**真实执行**：槽位注册契约（同一个 id、order、label thunk、按 `size` 出图标）、租约与 webview 属性、UA 只删 Electron token（干净 UA 原样通过、无 UA 不写入）、**卸载只隐藏不摘除、重挂复用同一访客、只申请一次租约**、会话恢复只写一次存储并只刷新一次（且恢复期间不快照）、使用中/卸载前的快照与定时器清理，以及无桥接时的降级与失败提示。重挂时重写样式表、俄语文案，以及原生弹窗通知订阅、协议限制、卸载清理，及正式刷新命令的桌面绑定和上下文。加入对抗反例：恢复期间定时保存、恢复失败与卸载、授权站点来源检查、迁移后删除快照不会复活，以及非本站 cookie 排除。
 
 ## 无法从 app 外部验证的部分
 
