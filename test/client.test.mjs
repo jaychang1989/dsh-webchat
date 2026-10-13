@@ -10,9 +10,7 @@
  *     shell approves;
  *   - the guest lives outside the panel mount: hiding it must not detach it, and
  *     remounting must reuse it;
- *   - where no guest bridge exists, the panel offers the window fallback;
- *   - a refresh control lives in the overlay strip, measured clear of the
- *     page's own corner chrome, and re-enables itself after the reload (#2).
+ *   - where no guest bridge exists, the panel offers the window fallback.
  */
 
 import { test } from 'node:test'
@@ -25,7 +23,6 @@ const BUNDLE = fileURLToPath(new URL('../lib/client.js', import.meta.url))
 const PAGE_URL = 'https://chat.deepseek.com/'
 const PANEL_ID = 'webchat'
 const OVERLAY = 'data-dsh-webchat-overlay'
-const CONTROLS = 'data-dsh-webchat-controls'
 
 /** A DOM element stub covering exactly what lib/client.js touches. */
 function element(tagName, document) {
@@ -103,6 +100,7 @@ function element(tagName, document) {
       this.reloads += 1
       return Promise.resolve()
     },
+    getURL() { return this.currentUrl ?? 'https://chat.deepseek.com/' },
     getBoundingClientRect() {
       return this.rect
     },
@@ -212,7 +210,6 @@ function loadBundle(document, options = {}) {
   const requests = []
   const beacons = []
   const intervals = new Map()
-  const timeouts = []
   const fakeReact = makeReact()
   let nextTimer = 1
   const defaultFetch = async (path, init) => {
@@ -247,24 +244,14 @@ function loadBundle(document, options = {}) {
     clearInterval(id) {
       intervals.delete(id)
     },
-    // Fake timer: recorded for assertions, fired on the next macrotask so a
-    // settle() round re-enables the refresh button deterministically.
-    setTimeout(fn, ms) {
-      timeouts.push({ fn, ms })
-      setImmediate(fn)
-      return timeouts.length
-    },
+
     ResizeObserver: class {
       constructor(callback) {
         this.callback = callback
         sandbox.observed.push(this)
       }
-      observe(target) {
-        this.target = target
-      }
-      disconnect() {
-        this.disconnected = true
-      }
+      observe() {}
+      disconnect() {}
     },
     observed: [],
     require: (name) => {
@@ -284,12 +271,12 @@ function loadBundle(document, options = {}) {
   if (bridge !== undefined) sandbox.dshDesktop = { protocolVersion: 1, browser: bridge }
   const context = vm.createContext(sandbox)
   vm.runInContext(readFileSync(BUNDLE, 'utf8'), context, { filename: 'client.js' })
-  return { rows, guestCalls, sandbox, react: fakeReact, requests, beacons, intervals, timeouts }
+  return { rows, guestCalls, sandbox, react: fakeReact, requests, beacons, intervals }
 }
 
 /** Load the plugin and capture the slot registrations it installs. */
 function loadPlugin(document, options) {
-  const { rows, guestCalls, sandbox, react, requests, beacons, intervals, timeouts } = loadBundle(document, options)
+  const { rows, guestCalls, sandbox, react, requests, beacons, intervals } = loadBundle(document, options)
   const plugin = rows[0].factory(sandbox.require)
   const registrations = []
   const effects = []
@@ -309,7 +296,7 @@ function loadPlugin(document, options) {
       return () => {}
     },
   }
-  return { plugin, ctx, registrations, effects, guestCalls, sandbox, react, requests, beacons, intervals, timeouts }
+  return { plugin, ctx, registrations, effects, guestCalls, sandbox, react, requests, beacons, intervals }
 }
 
 /** Let the guest promise chain settle. */
@@ -446,18 +433,35 @@ test('plugin disposal releases the guest', async () => {
   assert.equal(document.querySelector('[' + OVERLAY + ']'), null, 'the container must be removed')
 })
 
-test('the guest keeps the real browser identity', async () => {
+test('the guest drops only the Electron token from its identity', async () => {
   const document = makeDocument()
   const { plugin, ctx, registrations, react } = loadPlugin(document, { userAgent: 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 Chrome/138.0.7204.50 Electron/37.0.0 Safari/537.36' })
   plugin.apply(ctx)
   react.render(registrations[1].component).mount(element('div', document))
   await settle()
   const frame = document.created.find((el) => el.tagName === 'WEBVIEW')
-  assert.equal(frame.getAttribute('useragent'), null)
+  // The Chrome version and everything else stay byte-for-byte; only the
+  // Electron token disappears, so the site's literal substring check and the
+  // client hints both stay consistent.
+  assert.equal(frame.getAttribute('useragent'), 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 Chrome/138.0.7204.50 Safari/537.36')
   frame.dispatch('dom-ready', {})
   await settle()
-  assert.deepEqual(frame.userAgents, [])
-  assert.deepEqual(frame.calls, ['loadURL'])
+  assert.deepEqual(frame.userAgents, ['Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 Chrome/138.0.7204.50 Safari/537.36'])
+  assert.deepEqual(frame.calls, ['setUserAgent', 'loadURL'])
+})
+
+test('a user agent without the Electron token is left untouched', async () => {
+  const document = makeDocument()
+  const clean = 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/138.0.7204.50 Safari/537.36'
+  const { plugin, ctx, registrations, react } = loadPlugin(document, { userAgent: clean })
+  plugin.apply(ctx)
+  react.render(registrations[1].component).mount(element('div', document))
+  await settle()
+  const frame = document.created.find((el) => el.tagName === 'WEBVIEW')
+  assert.equal(frame.getAttribute('useragent'), clean, 'a clean UA must pass through byte-for-byte')
+  frame.dispatch('dom-ready', {})
+  await settle()
+  assert.deepEqual(frame.calls, ['setUserAgent', 'loadURL'])
 })
 
 test('a renderer that reports no user agent adds no override', async () => {
@@ -691,59 +695,6 @@ test('restore skips old WAF storage and accepts imported cookies without Electro
   assert.equal(frame.reloads, 1)
 })
 
-test('the guest carries a refresh control that reloads the page', async () => {
-  const document = makeDocument()
-  const { plugin, ctx, registrations, react, timeouts } = loadPlugin(document)
-  plugin.apply(ctx)
-  react.render(registrations[1].component).mount(element('div', document))
-  await settle()
-
-  const container = document.created.find((el) => el.getAttribute(OVERLAY) !== null)
-  const frame = document.created.find((el) => el.tagName === 'WEBVIEW')
-  const controls = document.created.find((el) => el.getAttribute(CONTROLS) !== null)
-  assert.ok(controls !== undefined, 'the refresh strip must exist')
-  assert.equal(controls.parentElement, container, 'the strip hides with the panel: it lives in the overlay')
-  assert.equal(controls.parentElement, frame.parentElement)
-  assert.equal(controls.children.length, 1)
-  const button = controls.children[0]
-  assert.equal(button.className, 'dsh-wc-refresh')
-  assert.equal(button.textContent, '刷新对话', 'the label follows the shell locale (zh-CN here)')
-
-  await button.dispatch('click', {})
-  assert.equal(frame.reloads, 1, 'the click reloads the guest')
-  assert.equal(button.disabled, true)
-  button.dispatch('click', {})
-  assert.equal(frame.reloads, 1, 'a disabled button must not reload again')
-  assert.deepEqual(timeouts.map((entry) => entry.ms), [1500])
-  await settle()
-  assert.equal(button.disabled, false, 'the button re-enables itself')
-})
-
-test('the refresh strip clears the page header by measuring its own width', async () => {
-  const document = makeDocument()
-  const { plugin, ctx, registrations, react, sandbox } = loadPlugin(document)
-  plugin.apply(ctx)
-  react.render(registrations[1].component).mount(element('div', document))
-  await settle()
-
-  const controls = document.created.find((el) => el.getAttribute(CONTROLS) !== null)
-  const button = controls.children[0]
-  const observer = sandbox.observed.find((entry) => entry.target === button)
-  assert.ok(observer !== undefined, 'the strip must re-measure on the first real layout')
-
-  // Hidden container: a hidden button reports width 0, nothing is offset.
-  controls.style.marginTop = ''
-  button.rect = { left: 0, top: 0, width: 0, height: 0 }
-  observer.callback()
-  assert.equal(controls.style.marginTop, '')
-
-  // Laid out: half the button width below the top edge, so the page's own
-  // Share button in the corner stays clickable (#2).
-  button.rect = { left: 0, top: 0, width: 96, height: 26 }
-  observer.callback()
-  assert.equal(controls.style.marginTop, '48px')
-})
-
 test('re-applying the plugin rewrites the injected stylesheet', () => {
   const document = makeDocument()
   const { plugin, ctx } = loadPlugin(document)
@@ -753,18 +704,6 @@ test('re-applying the plugin rewrites the injected stylesheet', () => {
   tag.textContent = '/* stale CSS from before a hot swap */'
   plugin.apply(ctx)
   assert.equal(document.getElementById('dsh-webchat-style').textContent, fresh)
-})
-
-test('the refresh label follows a Russian shell locale', async () => {
-  const document = makeDocument()
-  document.documentElement.setAttribute('lang', 'ru-RU')
-  const { plugin, ctx, registrations, react } = loadPlugin(document)
-  plugin.apply(ctx)
-  assert.equal(registrations[0].definition.label(), 'Chat DeepSeek')
-  react.render(registrations[1].component).mount(element('div', document))
-  await settle()
-  const controls = document.created.find((el) => el.getAttribute(CONTROLS) !== null)
-  assert.equal(controls.children[0].textContent, 'Обновить')
 })
 
 
@@ -848,3 +787,94 @@ test('an external _blank link is handed to the host route', async () => {
   assert.equal(opens[0].body.url, 'https://ext.example/p?a=1&b=2')
 })
 
+
+test('AUDIT: no periodic save while the login is still being restored', async () => {
+  const document = makeDocument()
+  const { plugin, ctx, registrations, react, requests, intervals } = loadPlugin(document, { restoreStorage: [['userToken', 'saved-login']] })
+  plugin.apply(ctx)
+  react.render(registrations[1].component).mount(element('div', document))
+  await settle()
+  const frame = document.created.find((el) => el.tagName === 'WEBVIEW')
+  frame.reply = JSON.stringify({ storage: [], cookie: '' })
+  await [...intervals.values()][0].fn()
+  await settle()
+  assert.equal(requests.filter((r) => r.path.endsWith('/session/save')).length, 0, 'empty guest data must not overwrite the login snapshot before restore completes')
+})
+
+test('AUDIT: use the host popup bridge so window.open links are not lost', async () => {
+  const document = makeDocument()
+  const subscriptions = []
+  const { plugin, ctx, registrations, react } = loadPlugin(document, { bridge: {
+    acquire: async () => ({ lease: 'lease-1', partition: 'dsh-sidebar-browser-test' }),
+    release: async () => {},
+    onOpenRequested: (lease, fn) => { subscriptions.push({ lease, fn }); return () => {} },
+  } })
+  plugin.apply(ctx)
+  react.render(registrations[1].component).mount(element('div', document))
+  await settle()
+  assert.equal(subscriptions.length, 1, 'rc.2 emits blocked window.open requests here; an anchor click patch cannot handle them')
+})
+
+test('AUDIT: a fresh login restore must not write tokens into an OAuth origin', async () => {
+  const document = makeDocument()
+  const { plugin, ctx, registrations, react } = loadPlugin(document, { restoreStorage: [['userToken', 'saved-login']] })
+  plugin.apply(ctx)
+  react.render(registrations[1].component).mount(element('div', document))
+  await settle()
+  const frame = document.created.find((el) => el.tagName === 'WEBVIEW')
+  frame.getURL = () => 'https://accounts.google.com/signin'
+  frame.dispatch('did-finish-load', {})
+  await settle()
+  assert.equal(frame.scripts.some((s) => s.includes('saved-login') && s.includes('setItem')), false, 'restore must be scoped to chat.deepseek.com')
+})
+
+test('snapshots on a foreign page never replace the DeepSeek login', async () => {
+  const document = makeDocument()
+  const { plugin, ctx, registrations, react, requests, intervals } = loadPlugin(document)
+  plugin.apply(ctx)
+  react.render(registrations[1].component).mount(element('div', document))
+  await settle()
+  const frame = document.created.find((el) => el.tagName === 'WEBVIEW')
+  frame.currentUrl = 'https://accounts.google.com/signin'
+  frame.reply = JSON.stringify({ storage: [['google', 'foreign']], cookie: 'google=foreign' })
+  frame.dispatch('did-finish-load', {})
+  await [...intervals.values()][0].fn()
+  await settle()
+  assert.equal(requests.filter((r) => r.path.endsWith('/session/save')).length, 0)
+})
+
+test('restoration failures preserve the old login across timers and disposal', async () => {
+  const document = makeDocument()
+  const { plugin, ctx, registrations, react, requests, intervals, effects, sandbox, beacons } = loadPlugin(document, { restoreStorage: [['userToken', 'saved-login']] })
+  plugin.apply(ctx)
+  react.render(registrations[1].component).mount(element('div', document))
+  await settle()
+  const frame = document.created.find((el) => el.tagName === 'WEBVIEW')
+  frame.executeJavaScript = () => Promise.reject(new Error('navigation interrupted'))
+  frame.dispatch('did-finish-load', {})
+  await settle()
+  await [...intervals.values()][0].fn()
+  for (const fn of sandbox.window.listeners.beforeunload) fn({})
+  effects.map((fn) => fn()).filter((fn) => typeof fn === 'function').forEach((fn) => fn())
+  await settle()
+  assert.equal(beacons.length, 0)
+  assert.equal(requests.filter((r) => r.path.endsWith('/session/save')).length, 0)
+})
+
+test('periodic saves stay blocked until the post-restore reload has finished', async () => {
+  const document = makeDocument()
+  const { plugin, ctx, registrations, react, requests, intervals } = loadPlugin(document, { restoreStorage: [['userToken', 'saved-login']] })
+  plugin.apply(ctx)
+  react.render(registrations[1].component).mount(element('div', document))
+  await settle()
+  const frame = document.created.find((el) => el.tagName === 'WEBVIEW')
+  frame.dispatch('did-finish-load', {})
+  await settle()
+  await [...intervals.values()][0].fn()
+  await settle()
+  assert.equal(requests.filter((r) => r.path.endsWith('/session/save')).length, 0)
+  frame.reply = JSON.stringify({ origin: PAGE_URL.slice(0, -1), storage: [['userToken', 'saved-login']], cookie: '' })
+  frame.dispatch('did-finish-load', {})
+  await settle()
+  assert.equal(requests.filter((r) => r.path.endsWith('/session/save')).length, 1)
+})

@@ -607,3 +607,23 @@ test('the external route hands the URL to the system browser', async () => {
   }
 })
 
+
+test('AUDIT: deleting the migrated snapshot must not sign the user back in', () => {
+  const { dir, cleanup } = tempHome()
+  const legacy = join(dir, 'old', 'session.json'), home = join(dir, 'new'), target = join(home, 'dsh-webchat', 'session.json')
+  const previous = process.env.DSH_HOME
+  setSessionFile(null)
+  setLegacySessionFile(legacy)
+  try {
+    process.env.DSH_HOME = home
+    writeSnapshot(legacy, { storage: [['userToken', 'old-login']], cookie: 'ds_session=old', cookies: [] })
+    assert.ok(readSessionSnapshot(target))
+    rmSync(target)
+    assert.equal(readSessionSnapshot(target), null, 'the documented logout action must not re-import the retained credentials')
+  } finally {
+    if (previous === undefined) delete process.env.DSH_HOME
+    else process.env.DSH_HOME = previous
+    setLegacySessionFile(null)
+    cleanup()
+  }
+})

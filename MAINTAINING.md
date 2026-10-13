@@ -17,9 +17,11 @@
 
 这是宿主的**原生访客**，不是 iframe，所以 `frame-ancestors` 约束不到它；也因此它只能存在于桌面端。宿主没有给插件提供别的"显示网页"公开 API，本插件用的是与内置浏览器相同的那条 IPC 通道，所以**升级 DSH 时要重新核对 `DesktopBrowserGuests` 的约定**（`lib/preload-app.cjs`、`lib/main.js`）。
 
-### 保留真实浏览器身份
+### 用户代理：只删 Electron token
 
-不设置 `useragent` 属性，也不调用 `setUserAgent()`。旧版为了避免站点的环境提示而拼接 Chrome UA，但 issue #3 在 DSH Desktop 0.2.0-rc.2 上报告它会加重 AWS WAF 验证循环及 Google 登录拒绝，因此保留引擎默认身份。真实站点授权不能由替身测试保证。
+站点的「使用环境异常」检查是对 UA 的字面子串匹配（`includes("electron")`，#3 作者读过站点代码；0.7.6 保留完整 UA 后在真实桌面端复发）。因此 UA 只做一处 token 级编辑：`replace(/\s*Electron\/[\d.]+/i, "")`——Chrome 版本号与整个结构原样保留，`useragent` 属性（附加前）与 `setUserAgent()`（dom-ready 时）双通道写入，Sec-CH-UA 客户端提示依旧一致。
+
+**不要回到整串改写**：0.7.5 前的 `cleanUserAgent()` 把 `Chrome/x.y.z.w` 伪造成 `Chrome/x.0.0.0`，与客户端提示失配，issue #3 报告它在 rc.2 上加重 WAF 验证循环与 Google 登录拒绝。真实站点授权不能由替身测试保证。
 
 ## 槽位契约
 
@@ -53,18 +55,13 @@ guest.container.style.display = alive ? "block" : "none"
 
 矩形在 `ResizeObserver`（监听自己那个格子）与 `window resize` 时同步。面板的位置完全来自 slot 给它的空间，不去读别人的 DOM 或样式。插件被卸载时（`ctx.effect` 的清理）才移除容器并 `release(lease)`。
 
-## 刷新按钮
+## 样式表注入
 
-访客整次运行只加载一次（issue #2），服务器端的变化（手机上新开的会话）只能靠重启才能看到。所以 overlay 容器里放了一个**刷新**按钮：点击 `element.reload()`，随后禁用 1.5 秒防连点，计时到自恢复。它住在容器里，随面板一起隐藏、随插件一起销毁；销毁时断开自己的 `ResizeObserver`。
+`ensureStyle()` 每次 apply 都**重写**已注入 `<style>` 的 `textContent`，不再见 id 就返回：热替换客户端模块后，新代码曾配着旧 CSS 跑，几何改动看起来像被忽略（#2 踩过的坑）。
 
-两个刻意的细节：
+语言读取：`document.documentElement[lang]` 为准（标签 thunk 同一来源），`navigator.language` 只兜底；桌面端 shell 语言与渲染进程区域设置可能不一致，但暂无公开 API 可读 shell 语言。俄语分支随 #2 引入并保留。
 
-- **不占页面自己的右上角**：`chat.deepseek.com` 的会话头就在那儿放着自己的 Share 按钮，控件压上去那个按钮就点不到了。条带从面板顶边往下让出**自身宽度的一半**——宽度按按钮实测（`ResizeObserver` 在第一次真实布局时触发），随语言（Обновить / 刷新对话 / Refresh chats）伸缩；容器隐藏时按钮量出 0，实测直接跳过。
-- **条带 shrink-to-fit**：绝对定位只给 `right` 不给 `left`，宽度收缩到内容——绝不能做成横跨面板的透明条去吞页面点击（#1 的猜测）。
-
-语言仍读 `document.documentElement[lang]`（标签 thunk 同一来源），`navigator.language` 只兜底；桌面端 shell 语言与渲染进程区域设置可能不一致，但暂无公开 API 可读 shell 语言，以页面 lang 为准。新增了俄语分支（#2 的报告人就是俄语环境）。
-
-`ensureStyle()` 每次 apply 都**重写** `textContent`，不再见 id 就返回：热替换客户端模块后，新代码曾配着旧 CSS 跑，几何改动看起来像被忽略（#2 踩过的坑）。
+（#2 曾要求的刷新控件在 0.7.7 应仓库所有者要求撤除：访客重载改由用户自行触发——重启 DSH 即可。）
 
 ## 回复里的外链为什么能打开了（#1）
 
@@ -141,7 +138,7 @@ test/*.test.mjs    node --test
 node --test
 ```
 
-48 个用例。宿主半区用假 context、假 request/response 与**可注入的 Electron/cookie 替身**驱动：快照落盘往返、cookie 捕获与回灌（含 HttpOnly、拒绝一个不合法 cookie 不影响其余、缺 name/domain 的条目跳过）、两条会话路由的方法守卫与分区校验、"没有快照"是成功而非失败、拿不到 Electron 时如实报错且不影响页面、`DSH_HOME` 解析（非空即根、空白视为未设置、`~` 展开）与旧 `~/.dsh` 快照的一次性搬运（不覆盖新位置已有的数据）。浏览器半区用一层薄的 React 测试替身（`createElement`/`useRef`/`useEffect`）+ DOM 桩**真实执行**：槽位注册契约（同一个 id、order、label thunk、按 `size` 出图标）、租约与 webview 属性、保留原生 UA 且不写入覆盖值、**卸载只隐藏不摘除、重挂复用同一访客、只申请一次租约**、会话恢复只写一次存储并只刷新一次（且恢复期间不快照）、使用中/卸载前的快照与定时器清理，以及无桥接时的降级与失败提示。刷新条带单独覆盖：结构住在 overlay 里随面板隐藏、点击只 reload 一次且禁用防连点、1.5 秒后自恢复、按按钮实测宽度让开页面右上角、重挂时重写样式表、俄语文案，以及外链补丁（只劫持解析后为 http(s) 的外部 `_blank` 链接，站点自身与同页链接不碰；哨兵经 `console-message` 转发到 `/external`）。
+46 个用例。宿主半区用假 context、假 request/response 与**可注入的 Electron/cookie 替身**驱动：快照落盘往返、cookie 捕获与回灌（含 HttpOnly、拒绝一个不合法 cookie 不影响其余、缺 name/domain 的条目跳过）、两条会话路由的方法守卫与分区校验、"没有快照"是成功而非失败、拿不到 Electron 时如实报错且不影响页面、`DSH_HOME` 解析（非空即根、空白视为未设置、`~` 展开）与旧 `~/.dsh` 快照的一次性搬运（不覆盖新位置已有的数据）。浏览器半区用一层薄的 React 测试替身（`createElement`/`useRef`/`useEffect`）+ DOM 桩**真实执行**：槽位注册契约（同一个 id、order、label thunk、按 `size` 出图标）、租约与 webview 属性、UA 只删 Electron token（干净 UA 原样通过、无 UA 不写入）、**卸载只隐藏不摘除、重挂复用同一访客、只申请一次租约**、会话恢复只写一次存储并只刷新一次（且恢复期间不快照）、使用中/卸载前的快照与定时器清理，以及无桥接时的降级与失败提示。重挂时重写样式表、俄语文案，以及外链补丁（只劫持解析后为 http(s) 的外部 `_blank` 链接，站点自身与同页链接不碰；哨兵经 `console-message` 转发到 `/external`）。
 
 ## 无法从 app 外部验证的部分
 
@@ -150,7 +147,6 @@ node --test
 - **宿主半区能否真的拿到 Electron**（决定登录态能否保存）也只能在真实进程里验证：`GET /api/dsh-webchat/state` 的 `session.electron` 就是它的自检结果；测试用的是注入替身。
 - 登录态能否真正恢复，最终取决于 DeepSeek 把会话放在哪里：cookie（本插件能完整搬运，含 HttpOnly）与 localStorage（通用搬运）。若它改用其它存储，需要重新登录一次。
 - 页面是否还会弹「使用环境异常」，取决于站点的检查逻辑，同样以真实页面为准。
-- 刷新按钮与页面自身右上角 UI（Share）是否真正让得开、半透明悬停的观感，只能在真实桌面端目测；替身测试只覆盖测量与结构。
 
 ## Issue #3：验证状态与宿主限制
 

@@ -26,14 +26,13 @@ dsh plugin --profile desktop add github:jaychang1989/dsh-webchat
 2. Sign in to DeepSeek once — **restarts will not ask again**.
 
 - Clicking again collapses the panel. Switching to another panel (Plugins, Automation Tasks, a session …) only hides the guest, never unmounts it, so coming back neither reloads the page nor drops the session.
-- A translucent **refresh** button sits at the panel's top right (it clears on hover): server-side changes — a conversation started on the phone, say — are one click away, no DSH restart needed.
 - External reply links (citations and sources that would open a new window) now open in the **system default browser** — before, clicking them did nothing.
 - The shell hands every browser guest a **process-lifetime** partition (a fresh random name per run), so this plugin carries the session itself: the page's localStorage and its own cookies travel through the page, and the partition's cookies (**HttpOnly included**) travel through the host half wherever Electron is reachable. Without Electron, the first two still work.
 - **To sign out**: delete the snapshot file — the plugin keeps nothing else behind. It lives at `%USERPROFILE%\.dsh\dsh-webchat\session.json` by default, or follows `DSH_HOME` when that variable is set: `<DSH_HOME>\dsh-webchat\session.json`. A pre-existing snapshot under `~/.dsh` is carried over once on upgrade; the old file is kept and can be deleted manually afterwards.
 
 ## Login compatibility
 
-- Keep the desktop engine's native user agent; spoofing Chrome can worsen site challenges and Google sign-in rejection.
+- The user agent only drops the `Electron/<version>` token; everything else passes through byte-for-byte. This dodges the site's literal "electron" substring check (the 使用环境异常 dialog) without the version-fingerprint mismatch that once worsened WAF challenges and Google sign-in.
 - Automatic snapshots exclude AWS WAF cookies and storage. Old WAF storage is skipped during restore. Explicitly imported cookies are still restored as supplied, but WAF cookies are not automatically saved afterwards.
 - Some DSH Desktop 0.2.0-rc.2 environments expose no Electron cookie API. Page storage can still carry the login, but HttpOnly cookies cannot be saved or restored there. `/api/dsh-webchat/state` reports availability through `session.electron`.
 - These fixes do not guarantee that an embedded browser passes site challenges. Real sign-in, Google authorization and restart survival still depend on the host and site.
