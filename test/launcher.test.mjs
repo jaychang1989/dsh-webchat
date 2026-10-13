@@ -443,3 +443,28 @@ test('a host without Electron reports why instead of failing the guest', async (
     cleanup()
   }
 })
+
+test('host save filters WAF state including old unload snapshots', async () => {
+  const { file, cleanup } = tempSnapshot()
+  setSessionFile(file)
+  setElectronLoader(async () => fakeElectron(fakeCookies([
+    { name: 'aws-waf-token', value: 'stale', domain: '.deepseek.com' },
+    { name: 'ds_session_id', value: 'login', domain: '.deepseek.com', httpOnly: true },
+  ])))
+  try {
+    const { ctx, routes } = fakeContext()
+    apply(ctx)
+    const partition = 'dsh-sidebar-browser-11111111-2222-3333-4444-555555555555'
+    const dirty = { storage: [['userToken', 'login'], ['aws_waf_token', 'stale']], cookie: 'ds_session=abc;aws-waf-token=stale; theme=dark' }
+    await callRoute(routes, ROUTES.save, 'POST', { partition, ...dirty })
+    let saved = readSnapshot(file)
+    assert.deepEqual(saved.storage, [['userToken', 'login']])
+    assert.equal(saved.cookie, 'ds_session=abc; theme=dark')
+    assert.deepEqual(saved.cookies.map((cookie) => cookie.name), ['ds_session_id'])
+    writeSnapshot(file, dirty)
+    await callRoute(routes, ROUTES.save, 'POST', { partition })
+    saved = readSnapshot(file)
+    assert.deepEqual(saved.storage, [['userToken', 'login']])
+    assert.equal(saved.cookie, 'ds_session=abc; theme=dark')
+  } finally { setElectronLoader(null); setSessionFile(null); cleanup() }
+})

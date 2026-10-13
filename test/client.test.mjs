@@ -431,30 +431,18 @@ test('plugin disposal releases the guest', async () => {
   assert.equal(document.querySelector('[' + OVERLAY + ']'), null, 'the container must be removed')
 })
 
-test('the guest never advertises Electron to the page', async () => {
+test('the guest keeps the real browser identity', async () => {
   const document = makeDocument()
-  const { plugin, ctx, registrations, react } = loadPlugin(document, {
-    // What an Electron renderer actually reports.
-    userAgent: 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) dsh/0.2.0-rc.1 Chrome/138.0.7204.50 Electron/37.0.0 Safari/537.36',
-  })
+  const { plugin, ctx, registrations, react } = loadPlugin(document, { userAgent: 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 Chrome/138.0.7204.50 Electron/37.0.0 Safari/537.36' })
   plugin.apply(ctx)
-
-  const rendered = react.render(registrations[1].component)
-  rendered.mount(element('div', document))
+  react.render(registrations[1].component).mount(element('div', document))
   await settle()
-
   const frame = document.created.find((el) => el.tagName === 'WEBVIEW')
-  const declared = frame.getAttribute('useragent')
-  assert.ok(declared !== null, 'the guest must declare a clean user agent')
-  assert.ok(!declared.toLowerCase().includes('electron'), `the attribute still advertises Electron: ${declared}`)
-  assert.match(declared, /Chrome\/138/, 'the Chrome major version must stay truthful')
-
-  // The shell rewrites the guest's preferences, so the UA is set once more on
-  // the live guest — and before anything is requested.
+  assert.equal(frame.getAttribute('useragent'), null)
   frame.dispatch('dom-ready', {})
   await settle()
-  assert.deepEqual(frame.userAgents, [declared])
-  assert.deepEqual(frame.calls, ['setUserAgent', 'loadURL'], 'the user agent must land before the first navigation')
+  assert.deepEqual(frame.userAgents, [])
+  assert.deepEqual(frame.calls, ['loadURL'])
 })
 
 test('a renderer that reports no user agent adds no override', async () => {
@@ -651,4 +639,39 @@ test('a refused guest is reported with the host reason', async () => {
 
   assert.match(host.children[0].textContent, /载入失败/)
   assert.match(host.children[0].textContent, /workspace storage identity/)
+})
+
+test('snapshot script excludes WAF state and keeps login state', async () => {
+  const document = makeDocument()
+  const { plugin, ctx, registrations, react } = loadPlugin(document)
+  plugin.apply(ctx)
+  react.render(registrations[1].component).mount(element('div', document))
+  await settle()
+  const frame = document.created.find((el) => el.tagName === 'WEBVIEW')
+  frame.dispatch('did-finish-load', {})
+  await settle()
+  const localStorage = { userToken: 'login', aws_waf_token: 'stale', AWSWAFState: 'stale' }
+  Object.defineProperty(localStorage, 'getItem', { value: (key) => localStorage[key] })
+  const state = JSON.parse(vm.runInNewContext(frame.scripts[0], { localStorage, document: { cookie: 'ds_session=abc;aws-waf-token=stale; theme=dark' } }))
+  assert.deepEqual(state.storage, [['userToken', 'login']])
+  assert.equal(state.cookie, 'ds_session=abc; theme=dark')
+})
+
+test('restore skips old WAF storage and accepts imported cookies without Electron', async () => {
+  const document = makeDocument()
+  const { plugin, ctx, registrations, react } = loadPlugin(document, {
+    fetchImpl: async () => ({ json: async () => ({ ok: false, error: 'Electron unavailable', storage: [['userToken', 'login'], ['aws_waf_token', 'stale'], ['AWSWAFState', 'stale']], cookie: 'ds_session=abc; aws-waf-token=imported' }) }),
+  })
+  plugin.apply(ctx)
+  react.render(registrations[1].component).mount(element('div', document))
+  await settle()
+  const frame = document.created.find((el) => el.tagName === 'WEBVIEW')
+  frame.dispatch('did-finish-load', {})
+  await settle()
+  const written = [], cookies = [], page = {}
+  Object.defineProperty(page, 'cookie', { set: (value) => cookies.push(value) })
+  vm.runInNewContext(frame.scripts[0], { localStorage: { setItem: (...pair) => written.push(pair) }, document: page })
+  assert.deepEqual(written, [['userToken', 'login']])
+  assert.deepEqual(cookies, ['ds_session=abc; path=/', 'aws-waf-token=imported; path=/'])
+  assert.equal(frame.reloads, 1)
 })

@@ -29,6 +29,13 @@ dsh plugin --profile desktop add github:jaychang1989/dsh-webchat
 - The shell hands every browser guest a **process-lifetime** partition (a fresh random name per run), so this plugin carries the session itself: the page's localStorage and its own cookies travel through the page, and the partition's cookies (**HttpOnly included**) travel through the host half wherever Electron is reachable. Without Electron, the first two still work.
 - **To sign out**: delete `%USERPROFILE%\.dsh\dsh-webchat\session.json`. The plugin keeps nothing else behind.
 
+## Login compatibility
+
+- Keep the desktop engine's native user agent; spoofing Chrome can worsen site challenges and Google sign-in rejection.
+- Automatic snapshots exclude AWS WAF cookies and storage. Old WAF storage is skipped during restore. Explicitly imported cookies are still restored as supplied, but WAF cookies are not automatically saved afterwards.
+- Some DSH Desktop 0.2.0-rc.2 environments expose no Electron cookie API. Page storage can still carry the login, but HttpOnly cookies cannot be saved or restored there. `/api/dsh-webchat/state` reports availability through `session.electron`.
+- These fixes do not guarantee that an embedded browser passes site challenges. Real sign-in, Google authorization and restart survival still depend on the host and site.
+
 ## Requirements
 
 - DeepSeek Harness **0.2.0-rc.1 or a newer 0.2.x**

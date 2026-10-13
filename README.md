@@ -30,6 +30,13 @@ dsh plugin --profile desktop add github:jaychang1989/dsh-webchat
 - 桌面端给浏览器访客的分区是**进程内**的（每次运行随机命名），所以登录态由本插件自己保存：页面的 localStorage 与页面自己的 cookie 由页面侧搬运，分区 cookie（**含 HttpOnly**）在宿主能拿到 Electron 时一并搬运。宿主拿不到 Electron 时，前两条仍然生效。
 - **想退出登录**：删掉 `%USERPROFILE%\.dsh\dsh-webchat\session.json` 即可，本插件不会在别处留东西。
 
+## 登录兼容性
+
+- 保留桌面端的真实浏览器身份，不再伪装成 Chrome，以避免加重网页验证和 Google 登录异常。
+- 自动保存时排除 AWS WAF 验证 cookie 和存储；恢复旧快照时跳过 WAF 存储。手动导入的 cookie 仍按原样恢复，但之后不会自动保存其中的 WAF cookie。
+- DSH Desktop 0.2.0-rc.2 的部分环境无法提供 Electron cookie 接口：此时仍通过页面存储恢复登录，但无法保存或恢复 HttpOnly cookie。诊断接口 `/api/dsh-webchat/state` 的 `session.electron` 会报告可用性。
+- 上述修复不能保证内嵌浏览器一定能通过站点验证；真实登录、Google 授权及重启恢复仍取决于宿主与站点行为。
+
 ## 环境要求
 
 - DeepSeek Harness **0.2.0-rc.1 或更新的 0.2.x**

@@ -17,9 +17,9 @@
 
 这是宿主的**原生访客**，不是 iframe，所以 `frame-ancestors` 约束不到它；也因此它只能存在于桌面端。宿主没有给插件提供别的"显示网页"公开 API，本插件用的是与内置浏览器相同的那条 IPC 通道，所以**升级 DSH 时要重新核对 `DesktopBrowserGuests` 的约定**（`lib/preload-app.cjs`、`lib/main.js`）。
 
-### 访客不暴露 Electron
+### 保留真实浏览器身份
 
-`chat.deepseek.com` 的前端会检查 `navigator.userAgent` 里是否含 `electron`，命中就弹「使用环境异常」，而"不再提示"记在访客分区的存储里——分区是进程内的，所以每次重启都会再弹。因此访客改用普通 Chrome UA（Chrome 大版本取自本渲染进程自己的 UA，保持真实）：既写在 `<webview useragent>` 属性上，也在 `dom-ready` 后、首次导航前用 `setUserAgent()` 再落一次（因为宿主会重写 guest 的 preferences）。
+不设置 `useragent` 属性，也不调用 `setUserAgent()`。旧版为了避免站点的环境提示而拼接 Chrome UA，但 issue #3 在 DSH Desktop 0.2.0-rc.2 上报告它会加重 AWS WAF 验证循环及 Google 登录拒绝，因此保留引擎默认身份。真实站点授权不能由替身测试保证。
 
 ## 槽位契约
 
@@ -59,7 +59,7 @@ guest.container.style.display = alive ? "block" : "none"
 
 于是本插件自己接管这件事，用**两条彼此独立的通道**：
 
-1. **站点存储 + 页面自己的 cookie**，由浏览器半区通用搬运：`<webview>.executeJavaScript` 读写 localStorage（不依赖任何具体键名）与 `document.cookie`。**这条通道不依赖 Electron**，是底线。
+1. **站点存储 + 页面自己的 cookie**，由浏览器半区通用搬运：`<webview>.executeJavaScript` 读写 localStorage 与 `document.cookie`（排除 WAF 验证状态）。**这条通道不依赖 Electron**，是底线。
 2. **分区 cookie（含 HttpOnly）**，由宿主半区搬运：它跑在 **Electron 主进程**里才能 `session.fromPartition(partition).cookies`——渲染进程永远读不到 HttpOnly。
 
 **教训（真实踩过，别再犯）**：最初 `POST /session/save` 在写文件之前先取 Electron session，拿不到就整个请求失败——于是**快照文件从来没被写出来**，连本来能独立工作的 localStorage 通道也被一起拖死了。现在的规矩是：**Electron 只是增强，不是前提**。取不到就记下原因（返回体里的 `error`），照常写快照。
@@ -115,7 +115,7 @@ test/*.test.mjs    node --test
 node --test
 ```
 
-34 个用例。宿主半区用假 context、假 request/response 与**可注入的 Electron/cookie 替身**驱动：快照落盘往返、cookie 捕获与回灌（含 HttpOnly、拒绝一个不合法 cookie 不影响其余、缺 name/domain 的条目跳过）、两条会话路由的方法守卫与分区校验、"没有快照"是成功而非失败、拿不到 Electron 时如实报错且不影响页面。浏览器半区用一层薄的 React 测试替身（`createElement`/`useRef`/`useEffect`）+ DOM 桩**真实执行**：槽位注册契约（同一个 id、order、label thunk、按 `size` 出图标）、租约与 webview 属性、`dom-ready` 时先改 UA 再导航且顺序正确、**卸载只隐藏不摘除、重挂复用同一访客、只申请一次租约**、会话恢复只写一次存储并只刷新一次（且恢复期间不快照）、使用中/卸载前的快照与定时器清理，以及无桥接时的降级与失败提示。
+37 个用例。宿主半区用假 context、假 request/response 与**可注入的 Electron/cookie 替身**驱动：快照落盘往返、cookie 捕获与回灌（含 HttpOnly、拒绝一个不合法 cookie 不影响其余、缺 name/domain 的条目跳过）、两条会话路由的方法守卫与分区校验、"没有快照"是成功而非失败、拿不到 Electron 时如实报错且不影响页面。浏览器半区用一层薄的 React 测试替身（`createElement`/`useRef`/`useEffect`）+ DOM 桩**真实执行**：槽位注册契约（同一个 id、order、label thunk、按 `size` 出图标）、租约与 webview 属性、保留原生 UA 且不写入覆盖值、**卸载只隐藏不摘除、重挂复用同一访客、只申请一次租约**、会话恢复只写一次存储并只刷新一次（且恢复期间不快照）、使用中/卸载前的快照与定时器清理，以及无桥接时的降级与失败提示。
 
 ## 无法从 app 外部验证的部分
 
@@ -124,3 +124,9 @@ node --test
 - **宿主半区能否真的拿到 Electron**（决定登录态能否保存）也只能在真实进程里验证：`GET /api/dsh-webchat/state` 的 `session.electron` 就是它的自检结果；测试用的是注入替身。
 - 登录态能否真正恢复，最终取决于 DeepSeek 把会话放在哪里：cookie（本插件能完整搬运，含 HttpOnly）与 localStorage（通用搬运）。若它改用其它存储，需要重新登录一次。
 - 页面是否还会弹「使用环境异常」，取决于站点的检查逻辑，同样以真实页面为准。
+
+## Issue #3：验证状态与宿主限制
+
+自动快照在页面侧与宿主保存路由侧都排除 `aws-waf-token` cookie 和 `/^(aws_waf|awswaf)/i` 存储键，包含不带页面状态的卸载保存。恢复时忽略旧快照中的 WAF 存储，但保持 cookie 原样恢复，以兼容问题报告中的手动导入流程；下一次自动保存会剔除 WAF cookie。测试实际执行注入脚本，验证登录字段保留和验证字段过滤。
+
+rc.2 中 Electron 不可达属于能力限制，不能靠 `document.cookie` 恢复 HttpOnly。保留现有降级和诊断，不声称该通道已修复。官方桌面端的浏览器桥接需要核对 `apps/desktop/src/preload-app.ts` 及它引用的浏览器桥接实现；不能猜测或调用未公开的 cookie 方法。
