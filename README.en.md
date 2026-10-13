@@ -26,8 +26,10 @@ dsh plugin --profile desktop add github:jaychang1989/dsh-webchat
 2. Sign in to DeepSeek once — **restarts will not ask again**.
 
 - Clicking again collapses the panel. Switching to another panel (Plugins, Automation Tasks, a session …) only hides the guest, never unmounts it, so coming back neither reloads the page nor drops the session.
+- A translucent **refresh** button sits at the panel's top right (it clears on hover): server-side changes — a conversation started on the phone, say — are one click away, no DSH restart needed.
+- External reply links (citations and sources that would open a new window) now open in the **system default browser** — before, clicking them did nothing.
 - The shell hands every browser guest a **process-lifetime** partition (a fresh random name per run), so this plugin carries the session itself: the page's localStorage and its own cookies travel through the page, and the partition's cookies (**HttpOnly included**) travel through the host half wherever Electron is reachable. Without Electron, the first two still work.
-- **To sign out**: delete `%USERPROFILE%\.dsh\dsh-webchat\session.json`. The plugin keeps nothing else behind.
+- **To sign out**: delete the snapshot file — the plugin keeps nothing else behind. It lives at `%USERPROFILE%\.dsh\dsh-webchat\session.json` by default, or follows `DSH_HOME` when that variable is set: `<DSH_HOME>\dsh-webchat\session.json`. A pre-existing snapshot under `~/.dsh` is carried over once on upgrade; the old file is kept and can be deleted manually afterwards.
 
 ## Login compatibility
 

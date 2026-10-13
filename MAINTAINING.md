@@ -53,6 +53,31 @@ guest.container.style.display = alive ? "block" : "none"
 
 矩形在 `ResizeObserver`（监听自己那个格子）与 `window resize` 时同步。面板的位置完全来自 slot 给它的空间，不去读别人的 DOM 或样式。插件被卸载时（`ctx.effect` 的清理）才移除容器并 `release(lease)`。
 
+## 刷新按钮
+
+访客整次运行只加载一次（issue #2），服务器端的变化（手机上新开的会话）只能靠重启才能看到。所以 overlay 容器里放了一个**刷新**按钮：点击 `element.reload()`，随后禁用 1.5 秒防连点，计时到自恢复。它住在容器里，随面板一起隐藏、随插件一起销毁；销毁时断开自己的 `ResizeObserver`。
+
+两个刻意的细节：
+
+- **不占页面自己的右上角**：`chat.deepseek.com` 的会话头就在那儿放着自己的 Share 按钮，控件压上去那个按钮就点不到了。条带从面板顶边往下让出**自身宽度的一半**——宽度按按钮实测（`ResizeObserver` 在第一次真实布局时触发），随语言（Обновить / 刷新对话 / Refresh chats）伸缩；容器隐藏时按钮量出 0，实测直接跳过。
+- **条带 shrink-to-fit**：绝对定位只给 `right` 不给 `left`，宽度收缩到内容——绝不能做成横跨面板的透明条去吞页面点击（#1 的猜测）。
+
+语言仍读 `document.documentElement[lang]`（标签 thunk 同一来源），`navigator.language` 只兜底；桌面端 shell 语言与渲染进程区域设置可能不一致，但暂无公开 API 可读 shell 语言，以页面 lang 为准。新增了俄语分支（#2 的报告人就是俄语环境）。
+
+`ensureStyle()` 每次 apply 都**重写** `textContent`，不再见 id 就返回：热替换客户端模块后，新代码曾配着旧 CSS 跑，几何改动看起来像被忽略（#2 踩过的坑）。
+
+## 回复里的外链为什么能打开了（#1）
+
+访客的弹窗死在宿主的 will-attach 闸门上——只有宿主自己签发的租约才被放行——所以页面里 `target="_blank"` 的链接（回复的引用、来源）点下去毫无反应（issue #1）。渲染进程无法给 guest 挂 window-open 处理器，于是走一条三段管道：
+
+1. 每次 `did-finish-load` 向 guest 注入一段点击补丁（幂等，`__dshWebchatLinkPatch` 守卫）：`target="_blank"` 且解析后为 http(s)、又不是站点自己域名的链接 → `preventDefault()` 后 `console.warn('__dsh-webchat-open:<url>')`。同页链接、站点自身链接、非锚点点击一概不碰。
+2. `<webview>` 的 `console-message` 事件认出哨兵，把 URL POST 给 `POST /api/dsh-webchat/external`。
+3. 宿主只接受**绝对 http(s) URL**（`file:`、自定义协议、残缺串一律 400——该端点无鉴权，而「打开」是有副作用的动作），交给系统默认浏览器。
+
+Windows 上用 `rundll32 url.dll,FileProtocolHandler` 而不是 cmd 的 `start`：URL 里的 `&` 必须作为单个参数原样存活，`start` 会把未加引号的 `&` 当命令分隔符拆开。
+
+不做的事：Electron 可达时理论上可以经 `webContents.fromId(id).setWindowOpenHandler()` 接管一切弹窗（包括非锚点的 `window.open`），但 rc.2 宿主拿不到 Electron，且该路径只能在真实桌面端验证——不猜。
+
 ## 登录态为什么由插件自己保存
 
 宿主给访客的分区是 `dsh-sidebar-browser-${randomUUID()}`：**不带 `persist:` 前缀**（Electron 里即内存分区），而且**每次运行都是新名字**。所以 cookie 与站点存储随进程一起消失——DSH 自带的侧栏浏览器也一样。插件无法申请别的分区：主进程在 `will-attach-webview` 里硬校验 `params.partition !== lease.partition → preventDefault()`。
@@ -78,15 +103,16 @@ guest.container.style.display = alive ? "block" : "none"
 | 路由 | 语义 |
 | --- | --- |
 | `POST /session/restore` `{ partition }` | 校验 partition 形状（不符 → 400）→ 读快照 → 尝试把 cookie 写进该分区 → 返回 `{ ok, error, cookies, storage, cookie, savedAt }`。**没有快照也是 200**（`storage: null`）；**拿不到 Electron 只让 `ok:false` + `error`，storage/cookie 照常返回**——页面必须照常加载 |
+| `POST /external` `{ url }` | 只接受绝对 http(s) URL（其余 400）→ 交给系统默认浏览器 → `200 { via: 'system-browser' }`；打开器失败 500。服务 #1 的外链管道，见上节 |
 | `POST /session/save` `{ partition, storage?, cookie? }` | 读该分区 cookie（能拿就拿）+ 传进来的 storage/cookie，原子写到快照，**永远返回 200**（`error` 里说明 cookie 为什么没拿到）。**不带 `storage`/`cookie` 时保留上一次的**——卸载时的 beacon 走的正是这条路 |
 
 安全边界（都要保持）：
 
 - partition 必须匹配 `/^dsh-sidebar-browser-[0-9a-f-]{8,}$/`，插件绝不触碰别的 session；
-- 快照只写在 `~/.dsh/dsh-webchat/session.json`，以 `0o600` 先写临时文件再 `rename`（崩溃不会截断）；
+- 快照写在 DSH 统一数据根下的 `dsh-webchat/session.json`（#4）。根与宿主同规则解析（`@deepseek-ai/dsh-home-paths`）：`DSH_HOME` 非空即根——数据直接在其下，**不再拼第二层 `.dsh`**——否则 `~/.dsh`，`~` 前缀展开，空白视为未设置。以 `0o600` 先写临时文件再 `rename`（崩溃不会截断）。升级时旧的 `~/.dsh` 快照会被**原样搬一次**：仅生产默认路径触发、新位置已有快照则不动、旧文件保留不删（删除用户数据不是插件的职权）、损坏或缺失的旧文件直接忽略。chromeless 窗口 profile 同根：`dsh-webchat/app-window`（旧版在 `$DSH_HOME` 下多拼了一层 `.dsh`；该 profile 不迁移，降级窗口需重新登录一次）；
 - 内容是**明文凭据**：`GET /state` 只报**数量**，绝不回显 cookie 值——那个端点没有鉴权。
 
-两个测试缝只在测试里使用：`setSessionFile(path)` 与 `setElectronLoader(fn)`（生产路径不设置，走真实实现）。
+四个测试缝只在测试里使用：`setSessionFile(path)`、`setLegacySessionFile(path)`、`setExternalOpener(fn)` 与 `setElectronLoader(fn)`（生产路径不设置，走真实实现）。
 
 ## 目录与"无构建"政策
 
@@ -101,9 +127,9 @@ test/*.test.mjs    node --test
 
 ## 宿主半区
 
-`inject: ['webServer']`，四条 exact 路由：`GET /api/dsh-webchat/state`（诊断：`{ ok, url, appWindowOpen, last, attempts, session }`）、`POST /api/dsh-webchat/open`（窗口降级）、`POST /api/dsh-webchat/session/restore` 与 `POST /api/dsh-webchat/session/save`（登录态，语义见上）。
+`inject: ['webServer']`，五条 exact 路由：`GET /api/dsh-webchat/state`（诊断：`{ ok, url, appWindowOpen, last, attempts, session }`）、`POST /api/dsh-webchat/open`（窗口降级）、`POST /api/dsh-webchat/session/restore` 与 `POST /api/dsh-webchat/session/save`（登录态，语义见上）、`POST /api/dsh-webchat/external`（外链，语义见上表）。
 
-`openPage(strategies)` 依次走 `OPEN_STRATEGIES` 并记录**整条链路**（`attempts`），所以一次点击就能看出每条策略为什么失败。策略：`app-window`（先 `await import('electron')`，失败再 `createRequire(...)('electron')`，然后 `new BrowserWindow`）、`app-window-shell`（`msedge.exe`/`chrome.exe` + `--app=`）、`system-browser`。`electronApi()` 只要拿到 `BrowserWindow` **或** `session` 就算可用，两条调用方各取所需。
+`openPage(strategies)` 依次走 `OPEN_STRATEGIES` 并记录**整条链路**（`attempts`），所以一次点击就能看出每条策略为什么失败。策略：`app-window`（先 `await import('electron')`，失败再 `createRequire(...)('electron')`，然后 `new BrowserWindow`）、`app-window-shell`（`msedge.exe`/`chrome.exe` + `--app=`）、`system-browser`（Windows 用 `rundll32` 而非 cmd `start`——URL 里的 `&` 要作为单个参数存活）。`electronApi()` 只要拿到 `BrowserWindow` **或** `session` 就算可用，两条调用方各取所需。
 
 窗口句柄挂在 `globalThis[Symbol.for('@jaychang1989/dsh-webchat.window')]`：否则一次热重载会交给新模块一个 `null`，把已开的窗口变成孤儿。dispose 时**不关窗口**。
 
@@ -115,7 +141,7 @@ test/*.test.mjs    node --test
 node --test
 ```
 
-37 个用例。宿主半区用假 context、假 request/response 与**可注入的 Electron/cookie 替身**驱动：快照落盘往返、cookie 捕获与回灌（含 HttpOnly、拒绝一个不合法 cookie 不影响其余、缺 name/domain 的条目跳过）、两条会话路由的方法守卫与分区校验、"没有快照"是成功而非失败、拿不到 Electron 时如实报错且不影响页面。浏览器半区用一层薄的 React 测试替身（`createElement`/`useRef`/`useEffect`）+ DOM 桩**真实执行**：槽位注册契约（同一个 id、order、label thunk、按 `size` 出图标）、租约与 webview 属性、保留原生 UA 且不写入覆盖值、**卸载只隐藏不摘除、重挂复用同一访客、只申请一次租约**、会话恢复只写一次存储并只刷新一次（且恢复期间不快照）、使用中/卸载前的快照与定时器清理，以及无桥接时的降级与失败提示。
+48 个用例。宿主半区用假 context、假 request/response 与**可注入的 Electron/cookie 替身**驱动：快照落盘往返、cookie 捕获与回灌（含 HttpOnly、拒绝一个不合法 cookie 不影响其余、缺 name/domain 的条目跳过）、两条会话路由的方法守卫与分区校验、"没有快照"是成功而非失败、拿不到 Electron 时如实报错且不影响页面、`DSH_HOME` 解析（非空即根、空白视为未设置、`~` 展开）与旧 `~/.dsh` 快照的一次性搬运（不覆盖新位置已有的数据）。浏览器半区用一层薄的 React 测试替身（`createElement`/`useRef`/`useEffect`）+ DOM 桩**真实执行**：槽位注册契约（同一个 id、order、label thunk、按 `size` 出图标）、租约与 webview 属性、保留原生 UA 且不写入覆盖值、**卸载只隐藏不摘除、重挂复用同一访客、只申请一次租约**、会话恢复只写一次存储并只刷新一次（且恢复期间不快照）、使用中/卸载前的快照与定时器清理，以及无桥接时的降级与失败提示。刷新条带单独覆盖：结构住在 overlay 里随面板隐藏、点击只 reload 一次且禁用防连点、1.5 秒后自恢复、按按钮实测宽度让开页面右上角、重挂时重写样式表、俄语文案，以及外链补丁（只劫持解析后为 http(s) 的外部 `_blank` 链接，站点自身与同页链接不碰；哨兵经 `console-message` 转发到 `/external`）。
 
 ## 无法从 app 外部验证的部分
 
@@ -124,6 +150,7 @@ node --test
 - **宿主半区能否真的拿到 Electron**（决定登录态能否保存）也只能在真实进程里验证：`GET /api/dsh-webchat/state` 的 `session.electron` 就是它的自检结果；测试用的是注入替身。
 - 登录态能否真正恢复，最终取决于 DeepSeek 把会话放在哪里：cookie（本插件能完整搬运，含 HttpOnly）与 localStorage（通用搬运）。若它改用其它存储，需要重新登录一次。
 - 页面是否还会弹「使用环境异常」，取决于站点的检查逻辑，同样以真实页面为准。
+- 刷新按钮与页面自身右上角 UI（Share）是否真正让得开、半透明悬停的观感，只能在真实桌面端目测；替身测试只覆盖测量与结构。
 
 ## Issue #3：验证状态与宿主限制
 

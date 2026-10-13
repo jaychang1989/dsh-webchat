@@ -10,7 +10,9 @@
  *     shell approves;
  *   - the guest lives outside the panel mount: hiding it must not detach it, and
  *     remounting must reuse it;
- *   - where no guest bridge exists, the panel offers the window fallback.
+ *   - where no guest bridge exists, the panel offers the window fallback;
+ *   - a refresh control lives in the overlay strip, measured clear of the
+ *     page's own corner chrome, and re-enables itself after the reload (#2).
  */
 
 import { test } from 'node:test'
@@ -23,6 +25,7 @@ const BUNDLE = fileURLToPath(new URL('../lib/client.js', import.meta.url))
 const PAGE_URL = 'https://chat.deepseek.com/'
 const PANEL_ID = 'webchat'
 const OVERLAY = 'data-dsh-webchat-overlay'
+const CONTROLS = 'data-dsh-webchat-controls'
 
 /** A DOM element stub covering exactly what lib/client.js touches. */
 function element(tagName, document) {
@@ -209,6 +212,7 @@ function loadBundle(document, options = {}) {
   const requests = []
   const beacons = []
   const intervals = new Map()
+  const timeouts = []
   const fakeReact = makeReact()
   let nextTimer = 1
   const defaultFetch = async (path, init) => {
@@ -243,13 +247,24 @@ function loadBundle(document, options = {}) {
     clearInterval(id) {
       intervals.delete(id)
     },
+    // Fake timer: recorded for assertions, fired on the next macrotask so a
+    // settle() round re-enables the refresh button deterministically.
+    setTimeout(fn, ms) {
+      timeouts.push({ fn, ms })
+      setImmediate(fn)
+      return timeouts.length
+    },
     ResizeObserver: class {
       constructor(callback) {
         this.callback = callback
         sandbox.observed.push(this)
       }
-      observe() {}
-      disconnect() {}
+      observe(target) {
+        this.target = target
+      }
+      disconnect() {
+        this.disconnected = true
+      }
     },
     observed: [],
     require: (name) => {
@@ -269,12 +284,12 @@ function loadBundle(document, options = {}) {
   if (bridge !== undefined) sandbox.dshDesktop = { protocolVersion: 1, browser: bridge }
   const context = vm.createContext(sandbox)
   vm.runInContext(readFileSync(BUNDLE, 'utf8'), context, { filename: 'client.js' })
-  return { rows, guestCalls, sandbox, react: fakeReact, requests, beacons, intervals }
+  return { rows, guestCalls, sandbox, react: fakeReact, requests, beacons, intervals, timeouts }
 }
 
 /** Load the plugin and capture the slot registrations it installs. */
 function loadPlugin(document, options) {
-  const { rows, guestCalls, sandbox, react, requests, beacons, intervals } = loadBundle(document, options)
+  const { rows, guestCalls, sandbox, react, requests, beacons, intervals, timeouts } = loadBundle(document, options)
   const plugin = rows[0].factory(sandbox.require)
   const registrations = []
   const effects = []
@@ -294,7 +309,7 @@ function loadPlugin(document, options) {
       return () => {}
     },
   }
-  return { plugin, ctx, registrations, effects, guestCalls, sandbox, react, requests, beacons, intervals }
+  return { plugin, ctx, registrations, effects, guestCalls, sandbox, react, requests, beacons, intervals, timeouts }
 }
 
 /** Let the guest promise chain settle. */
@@ -520,7 +535,7 @@ test('a fresh run without a snapshot never reloads the page', async () => {
   await settle()
 
   assert.equal(frame.reloads, 0)
-  assert.equal(frame.scripts.length, 1, 'only the storage read for the snapshot runs')
+  assert.equal(frame.scripts.length, 2, 'the storage read for the snapshot plus the link-patch injection')
 })
 
 test('the session is snapshotted as the page is used', async () => {
@@ -675,3 +690,161 @@ test('restore skips old WAF storage and accepts imported cookies without Electro
   assert.deepEqual(cookies, ['ds_session=abc; path=/', 'aws-waf-token=imported; path=/'])
   assert.equal(frame.reloads, 1)
 })
+
+test('the guest carries a refresh control that reloads the page', async () => {
+  const document = makeDocument()
+  const { plugin, ctx, registrations, react, timeouts } = loadPlugin(document)
+  plugin.apply(ctx)
+  react.render(registrations[1].component).mount(element('div', document))
+  await settle()
+
+  const container = document.created.find((el) => el.getAttribute(OVERLAY) !== null)
+  const frame = document.created.find((el) => el.tagName === 'WEBVIEW')
+  const controls = document.created.find((el) => el.getAttribute(CONTROLS) !== null)
+  assert.ok(controls !== undefined, 'the refresh strip must exist')
+  assert.equal(controls.parentElement, container, 'the strip hides with the panel: it lives in the overlay')
+  assert.equal(controls.parentElement, frame.parentElement)
+  assert.equal(controls.children.length, 1)
+  const button = controls.children[0]
+  assert.equal(button.className, 'dsh-wc-refresh')
+  assert.equal(button.textContent, '刷新对话', 'the label follows the shell locale (zh-CN here)')
+
+  await button.dispatch('click', {})
+  assert.equal(frame.reloads, 1, 'the click reloads the guest')
+  assert.equal(button.disabled, true)
+  button.dispatch('click', {})
+  assert.equal(frame.reloads, 1, 'a disabled button must not reload again')
+  assert.deepEqual(timeouts.map((entry) => entry.ms), [1500])
+  await settle()
+  assert.equal(button.disabled, false, 'the button re-enables itself')
+})
+
+test('the refresh strip clears the page header by measuring its own width', async () => {
+  const document = makeDocument()
+  const { plugin, ctx, registrations, react, sandbox } = loadPlugin(document)
+  plugin.apply(ctx)
+  react.render(registrations[1].component).mount(element('div', document))
+  await settle()
+
+  const controls = document.created.find((el) => el.getAttribute(CONTROLS) !== null)
+  const button = controls.children[0]
+  const observer = sandbox.observed.find((entry) => entry.target === button)
+  assert.ok(observer !== undefined, 'the strip must re-measure on the first real layout')
+
+  // Hidden container: a hidden button reports width 0, nothing is offset.
+  controls.style.marginTop = ''
+  button.rect = { left: 0, top: 0, width: 0, height: 0 }
+  observer.callback()
+  assert.equal(controls.style.marginTop, '')
+
+  // Laid out: half the button width below the top edge, so the page's own
+  // Share button in the corner stays clickable (#2).
+  button.rect = { left: 0, top: 0, width: 96, height: 26 }
+  observer.callback()
+  assert.equal(controls.style.marginTop, '48px')
+})
+
+test('re-applying the plugin rewrites the injected stylesheet', () => {
+  const document = makeDocument()
+  const { plugin, ctx } = loadPlugin(document)
+  plugin.apply(ctx)
+  const tag = document.getElementById('dsh-webchat-style')
+  const fresh = tag.textContent
+  tag.textContent = '/* stale CSS from before a hot swap */'
+  plugin.apply(ctx)
+  assert.equal(document.getElementById('dsh-webchat-style').textContent, fresh)
+})
+
+test('the refresh label follows a Russian shell locale', async () => {
+  const document = makeDocument()
+  document.documentElement.setAttribute('lang', 'ru-RU')
+  const { plugin, ctx, registrations, react } = loadPlugin(document)
+  plugin.apply(ctx)
+  assert.equal(registrations[0].definition.label(), 'Chat DeepSeek')
+  react.render(registrations[1].component).mount(element('div', document))
+  await settle()
+  const controls = document.created.find((el) => el.getAttribute(CONTROLS) !== null)
+  assert.equal(controls.children[0].textContent, 'Обновить')
+})
+
+
+
+test('the guest installs the external-link patch on every load', async () => {
+  const document = makeDocument()
+  const { plugin, ctx, registrations, react } = loadPlugin(document)
+  plugin.apply(ctx)
+  react.render(registrations[1].component).mount(element('div', document))
+  await settle()
+  const frame = document.created.find((el) => el.tagName === 'WEBVIEW')
+  frame.dispatch('did-finish-load', {})
+  await settle()
+
+  const patch = frame.scripts.find((code) => code.includes('__dshWebchatLinkPatch'))
+  assert.ok(patch !== undefined, 'the click patch must be injected on load')
+  assert.match(patch, /closest\('a\[href\]'\)/)
+  frame.dispatch('did-finish-load', {})
+  await settle()
+  assert.equal(frame.scripts.filter((code) => code.includes('__dshWebchatLinkPatch')).length, 2, 'the patch re-installs after a reload')
+})
+
+test('the link patch only hijacks external _blank anchors', async () => {
+  const document = makeDocument()
+  const { plugin, ctx, registrations, react } = loadPlugin(document)
+  plugin.apply(ctx)
+  react.render(registrations[1].component).mount(element('div', document))
+  await settle()
+  const frame = document.created.find((el) => el.tagName === 'WEBVIEW')
+  frame.dispatch('did-finish-load', {})
+  await settle()
+  const patch = frame.scripts.find((code) => code.includes('__dshWebchatLinkPatch'))
+
+  let handler = null
+  const anchor = (target, href, hostname) => ({ target, href, hostname, closest: function () { return this } })
+  const sandbox = {
+    window: {},
+    location: { hostname: 'chat.deepseek.com' },
+    document: { addEventListener: (type, fn) => { handler = fn } },
+    console: { warn: () => {} },
+  }
+  const result = vm.runInNewContext(patch, sandbox)
+  assert.equal(result, true)
+  assert.equal(typeof handler, 'function')
+
+  const click = (a) => {
+    const event = { target: a, prevented: false, stopped: false, preventDefault() { this.prevented = true }, stopPropagation() { this.stopped = true } }
+    handler(event)
+    return event
+  }
+  const external = click(anchor('_blank', 'https://ext.example/p?a=1&b=2', 'ext.example'))
+  assert.equal(external.prevented, true, 'an external _blank click is hijacked')
+  assert.equal(external.stopped, true)
+
+  const sameTab = click(anchor('', 'https://ext.example/other', 'ext.example'))
+  assert.equal(sameTab.prevented, false, 'a same-tab link keeps navigating the guest')
+
+  const ownSite = click(anchor('_blank', 'https://chat.deepseek.com/x', 'chat.deepseek.com'))
+  assert.equal(ownSite.prevented, false, "a link on the site itself keeps its popup")
+
+  const notAnAnchor = click({ closest: () => null })
+  assert.equal(notAnAnchor.prevented, false, 'a click outside any anchor is untouched')
+})
+
+test('an external _blank link is handed to the host route', async () => {
+  const document = makeDocument()
+  const { plugin, ctx, registrations, requests, react } = loadPlugin(document)
+  plugin.apply(ctx)
+  react.render(registrations[1].component).mount(element('div', document))
+  await settle()
+  const frame = document.created.find((el) => el.tagName === 'WEBVIEW')
+
+  frame.dispatch('console-message', { message: 'an ordinary console line' })
+  await settle()
+  assert.equal(requests.some((entry) => entry.path === '/api/dsh-webchat/external'), false, 'noise must not open anything')
+
+  frame.dispatch('console-message', { message: '__dsh-webchat-open:https://ext.example/p?a=1&b=2' })
+  await settle()
+  const opens = requests.filter((entry) => entry.path === '/api/dsh-webchat/external')
+  assert.equal(opens.length, 1, 'only the sentinel message opens')
+  assert.equal(opens[0].body.url, 'https://ext.example/p?a=1&b=2')
+})
+

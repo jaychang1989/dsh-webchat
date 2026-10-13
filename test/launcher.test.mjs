@@ -9,20 +9,24 @@
 
 import { test } from 'node:test'
 import assert from 'node:assert/strict'
-import { mkdtempSync, readFileSync, rmSync } from 'node:fs'
-import { tmpdir } from 'node:os'
-import { join } from 'node:path'
+import { existsSync, mkdtempSync, readFileSync, rmSync } from 'node:fs'
+import { homedir, tmpdir } from 'node:os'
+import { join, resolve } from 'node:path'
 
 const {
   apply,
+  dshHome,
   openPage,
   PAGE_URL,
   ROUTES,
   SESSION_FILE,
   captureCookies,
+  readSessionSnapshot,
   readSnapshot,
   restoreCookies,
   setElectronLoader,
+  setExternalOpener,
+  setLegacySessionFile,
   setSessionFile,
   shellExecutable,
   writeSnapshot,
@@ -32,6 +36,12 @@ const {
 function tempSnapshot() {
   const dir = mkdtempSync(join(tmpdir(), 'dsh-webchat-test-'))
   return { file: join(dir, 'session.json'), cleanup: () => rmSync(dir, { recursive: true, force: true }) }
+}
+
+/** A throwaway DSH home root, with room for a legacy tree beside it. */
+function tempHome() {
+  const dir = mkdtempSync(join(tmpdir(), 'dsh-webchat-home-'))
+  return { dir, cleanup: () => rmSync(dir, { recursive: true, force: true }) }
 }
 
 /** A fake `session.cookies`, recording what gets written. */
@@ -116,29 +126,38 @@ async function callRoute(routes, path, method, body) {
   return { status: response.status, headers: response.headers, payload: response.body === '' ? undefined : JSON.parse(response.body) }
 }
 
-test('apply registers the state, open and session routes', () => {
+test('apply registers the state, open, session and external routes', () => {
   const { ctx, routes, effects } = fakeContext()
   apply(ctx)
 
-  assert.deepEqual(routes.map(route => route.path), [ROUTES.state, ROUTES.open, ROUTES.restore, ROUTES.save])
+  assert.deepEqual(routes.map(route => route.path), [ROUTES.state, ROUTES.open, ROUTES.restore, ROUTES.save, ROUTES.external])
   assert.ok(routes.every(route => route.kind === 'exact'))
-  assert.equal(effects.length, 4)
+  assert.equal(effects.length, 5)
 })
 
 test('the state route reports the page and the closed window', async () => {
   const { ctx, routes } = fakeContext()
   apply(ctx)
   const state = routes.find(route => route.path === ROUTES.state)
-  const response = fakeResponse()
 
-  await state.handler({ method: 'GET' }, response)
+  // Pinned snapshot: without this the route would read — and, with DSH_HOME
+  // set, migrate — the real profile during tests.
+  const { file, cleanup } = tempSnapshot()
+  setSessionFile(file)
+  try {
+    const response = fakeResponse()
+    await state.handler({ method: 'GET' }, response)
 
-  assert.equal(response.status, 200)
-  const payload = JSON.parse(response.body)
-  assert.equal(payload.url, PAGE_URL)
-  assert.equal(payload.appWindowOpen, false)
-  assert.equal(typeof payload.last.ok, 'boolean')
-  assert.ok(Array.isArray(payload.attempts))
+    assert.equal(response.status, 200)
+    const payload = JSON.parse(response.body)
+    assert.equal(payload.url, PAGE_URL)
+    assert.equal(payload.appWindowOpen, false)
+    assert.equal(typeof payload.last.ok, 'boolean')
+    assert.ok(Array.isArray(payload.attempts))
+  } finally {
+    setSessionFile(null)
+    cleanup()
+  }
 })
 
 test('the state route reports every strategy that ran, failures included', async () => {
@@ -152,13 +171,21 @@ test('the state route reports every strategy that ran, failures included', async
     { via: 'system-browser', run: async () => 'system-browser' },
   ])
 
-  const response = fakeResponse()
-  await state.handler({ method: 'GET' }, response)
-  const payload = JSON.parse(response.body)
+  // Pinned snapshot, as in the test above.
+  const { file, cleanup } = tempSnapshot()
+  setSessionFile(file)
+  try {
+    const response = fakeResponse()
+    await state.handler({ method: 'GET' }, response)
+    const payload = JSON.parse(response.body)
 
-  assert.deepEqual(payload.attempts.map(a => [a.via, a.ok]), [['app-window', false], ['app-window-shell', true]])
-  assert.match(payload.attempts[0].error, /cjs require failed/)
-  assert.equal(payload.last.ok, true)
+    assert.deepEqual(payload.attempts.map(a => [a.via, a.ok]), [['app-window', false], ['app-window-shell', true]])
+    assert.match(payload.attempts[0].error, /cjs require failed/)
+    assert.equal(payload.last.ok, true)
+  } finally {
+    setSessionFile(null)
+    cleanup()
+  }
 })
 
 test('the state route refuses anything but GET', async () => {
@@ -468,3 +495,115 @@ test('host save filters WAF state including old unload snapshots', async () => {
     assert.equal(saved.cookie, 'ds_session=abc; theme=dark')
   } finally { setElectronLoader(null); setSessionFile(null); cleanup() }
 })
+
+test('dshHome follows $DSH_HOME the way the harness resolves it', () => {
+  const { dir, cleanup } = tempHome()
+  const saved = process.env.DSH_HOME
+  setSessionFile(null)
+  try {
+    process.env.DSH_HOME = dir
+    assert.equal(dshHome(), resolve(dir), 'a set DSH_HOME is the home root itself')
+    assert.equal(SESSION_FILE(), join(dir, 'dsh-webchat', 'session.json'), 'the snapshot follows the home root')
+    process.env.DSH_HOME = '   '
+    assert.equal(dshHome(), join(homedir(), '.dsh'), 'a blank DSH_HOME counts as unset')
+    delete process.env.DSH_HOME
+    assert.equal(dshHome(), join(homedir(), '.dsh'))
+    process.env.DSH_HOME = '~/dsh-root'
+    assert.equal(dshHome(), join(homedir(), 'dsh-root'), 'a ~ prefix expands against the OS home')
+  } finally {
+    if (saved === undefined) delete process.env.DSH_HOME
+    else process.env.DSH_HOME = saved
+    setSessionFile(null)
+    cleanup()
+  }
+})
+
+test('a pre-#4 snapshot under ~/.dsh is carried into the DSH home, never clobbering newer data', async () => {
+  const { dir, cleanup } = tempHome()
+  const legacyFile = join(dir, 'legacy', 'session.json')
+  const home = join(dir, 'home')
+  const newFile = join(home, 'dsh-webchat', 'session.json')
+  const saved = process.env.DSH_HOME
+  setLegacySessionFile(legacyFile)
+  try {
+    process.env.DSH_HOME = home
+    writeSnapshot(legacyFile, {
+      version: 1,
+      savedAt: 'legacy',
+      cookies: [{ name: 'ds_session', value: 'login', domain: '.deepseek.com' }],
+      storage: [['userToken', 'login']],
+      cookie: 'ds_session=abc',
+    })
+
+    // Reading through the state route migrates: the copy lands at the unified
+    // location and the legacy file itself is kept.
+    const { ctx, routes } = fakeContext()
+    apply(ctx)
+    const first = await callRoute(routes, ROUTES.state, 'GET')
+    assert.equal(first.payload.session.file, newFile)
+    assert.equal(first.payload.session.saved.cookies, 1)
+    assert.equal(existsSync(newFile), true)
+    assert.equal(existsSync(legacyFile), true)
+
+    // A snapshot that already exists at the unified location is never replaced
+    // by the stale copy — including one written after the migration.
+    writeSnapshot(newFile, {
+      version: 1,
+      savedAt: 'fresh',
+      cookies: [],
+      storage: [['userToken', 'fresh-a'], ['userToken', 'fresh-b']],
+      cookie: '',
+    })
+    const second = await callRoute(routes, ROUTES.state, 'GET')
+    assert.equal(second.payload.session.saved.storage, 2, 'the fresh snapshot must survive')
+
+    // Nothing to migrate: a missing legacy file is a plain read, and no
+    // directories are created for it.
+    setLegacySessionFile(join(dir, 'absent', 'session.json'))
+    assert.equal(readSessionSnapshot(join(dir, 'other', 'session.json')), null)
+    assert.equal(existsSync(join(dir, 'other')), false)
+  } finally {
+    if (saved === undefined) delete process.env.DSH_HOME
+    else process.env.DSH_HOME = saved
+    setLegacySessionFile(null)
+    cleanup()
+  }
+})
+
+
+test('the external route only opens absolute http(s) URLs', async () => {
+  const { ctx, routes } = fakeContext()
+  apply(ctx)
+
+  assert.equal((await callRoute(routes, ROUTES.external, 'GET')).status, 405)
+  // 'https:///no-host' is deliberately absent: WHATWG normalization turns it
+  // into a legitimate https://no-host/, so the route correctly accepts it.
+  for (const bad of ['file:///C:/Windows/notepad.exe', 'javascript:alert(1)', 'not a url', '', 'ftp://host/file']) {
+    const refused = await callRoute(routes, ROUTES.external, 'POST', { url: bad })
+    assert.equal(refused.status, 400, bad)
+    assert.match(refused.payload.error, /http\(s\)/)
+  }
+  const missing = await callRoute(routes, ROUTES.external, 'POST', {})
+  assert.equal(missing.status, 400, 'a body without a URL is refused')
+})
+
+test('the external route hands the URL to the system browser', async () => {
+  const { ctx, routes } = fakeContext()
+  apply(ctx)
+  const opened = []
+  setExternalOpener(async (url) => { opened.push(url) })
+  try {
+    const ok = await callRoute(routes, ROUTES.external, 'POST', { url: 'https://example.com/p?a=1&b=2' })
+    assert.equal(ok.status, 200)
+    assert.deepEqual(ok.payload, { ok: true, via: 'system-browser' })
+    assert.deepEqual(opened, ['https://example.com/p?a=1&b=2'], 'the URL travels unchanged, ampersands included')
+
+    setExternalOpener(async () => { throw new Error('no browser found') })
+    const failed = await callRoute(routes, ROUTES.external, 'POST', { url: 'https://example.com/' })
+    assert.equal(failed.status, 500)
+    assert.match(failed.payload.error, /no browser found/)
+  } finally {
+    setExternalOpener(null)
+  }
+})
+
