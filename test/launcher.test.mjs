@@ -338,6 +338,92 @@ test('the session routes reject a partition the shell never issued', async () =>
   }
 })
 
+test('the session routes accept a persisted guest partition from a shell patch', async () => {
+  const { file, cleanup } = tempSnapshot()
+  setSessionFile(file)
+  setElectronLoader(async () => fakeElectron(fakeCookies()))
+  try {
+    const { ctx, routes } = fakeContext()
+    apply(ctx)
+
+    const answer = await callRoute(routes, ROUTES.save, 'POST', {
+      partition: 'persist:dsh-sidebar-browser-11111111-2222-3333-4444-555555555555',
+    })
+    assert.equal(answer.status, 200, 'a persist: guest partition must not be rejected')
+    assert.equal(answer.payload.ok, true)
+  } finally {
+    setElectronLoader(null)
+    setSessionFile(null)
+    cleanup()
+  }
+})
+test('a persistent partition never restores a stale snapshot over its live login', async () => {
+  const { file, cleanup } = tempSnapshot()
+  setSessionFile(file)
+  // A logged-out snapshot from an earlier run, exactly the state that used to
+  // be written back over a still-valid login on every launch.
+  writeSnapshot(file, {
+    version: 1,
+    savedAt: '2026-09-29T00:00:00.000Z',
+    cookies: [{ name: 'ds_session_id', value: 'stale', domain: '.deepseek.com', path: '/', secure: true, httpOnly: true }],
+    storage: [['settingsJwt', '{"value":null,"__version":"0"}'], ['userToken', '{"value":null,"__version":"0"}']],
+    cookie: 'ds_session=stale',
+  })
+  const cookies = fakeCookies()
+  setElectronLoader(async () => fakeElectron(cookies))
+  try {
+    const { ctx, routes } = fakeContext()
+    apply(ctx)
+
+    const answer = await callRoute(routes, ROUTES.restore, 'POST', {
+      partition: 'persist:dsh-sidebar-browser-11111111-2222-3333-4444-555555555555',
+    })
+
+    assert.equal(answer.status, 200)
+    assert.deepEqual(answer.payload, { ok: true, cookies: 0, storage: null, cookie: '', savedAt: '' })
+    assert.equal(cookies.written.length, 0, 'no cookie may be written over the live login')
+  } finally {
+    setElectronLoader(null)
+    setSessionFile(null)
+    cleanup()
+  }
+})
+
+test('a persistent partition never overwrites its live login with a stale save', async () => {
+  const { file, cleanup } = tempSnapshot()
+  setSessionFile(file)
+  writeSnapshot(file, {
+    version: 1,
+    savedAt: 'keep',
+    cookies: [{ name: 'ds_session_id', value: 'live', domain: '.deepseek.com', path: '/', secure: true, httpOnly: true }],
+    storage: [['settingsJwt', 'live-token']],
+    cookie: 'ds_session=live',
+  })
+  // The guard must return before it ever touches the partition's session.
+  setElectronLoader(async () => { throw new Error('the partition session must not be read') })
+  try {
+    const { ctx, routes } = fakeContext()
+    apply(ctx)
+
+    const answer = await callRoute(routes, ROUTES.save, 'POST', {
+      partition: 'persist:dsh-sidebar-browser-11111111-2222-3333-4444-555555555555',
+      storage: [['settingsJwt', '{"value":null,"__version":"0"}']],
+      cookie: 'ds_session=stale',
+    })
+
+    assert.equal(answer.status, 200)
+    assert.equal(answer.payload.ok, true)
+    const onDisk = readSnapshot(file)
+    assert.equal(onDisk.savedAt, 'keep', 'the earlier snapshot must be left untouched')
+    assert.deepEqual(onDisk.storage, [['settingsJwt', 'live-token']])
+    assert.equal(onDisk.cookie, 'ds_session=live')
+  } finally {
+    setElectronLoader(null)
+    setSessionFile(null)
+    cleanup()
+  }
+})
+
 test('saving snapshots the partition cookies and the page storage', async () => {
   const { file, cleanup } = tempSnapshot()
   setSessionFile(file)

@@ -4,7 +4,7 @@
 
 ## 介绍
 
-在 [DeepSeek Harness Desktop](https://github.com/deepseek-ai/deepseek-harness) 里打开 [chat.deepseek.com](https://chat.deepseek.com) 官方网页版：点侧边栏「Chat DeepSeek」，真实页面就渲染在 **DSH 窗口的中栏**里，和「自动化任务」那类整页视图一样。
+在 [DeepSeek Harness Desktop](https://github.com/deepseek-ai/deepseek-harness) 里打开 [chat.deepseek.com](https://chat.deepseek.com) 官方网页版：点侧边栏「Chat」，真实页面就渲染在 **DSH 窗口的中栏**里，和「自动化任务」那类整页视图一样。
 
 
 ## 安装
@@ -23,7 +23,7 @@ dsh plugin --profile desktop add github:jaychang1989/dsh-webchat
 
 ## 使用
 
-1. 点侧边栏的「Chat DeepSeek」——页面直接在中栏载入，不需要第二次点击；
+1. 点侧边栏的「Chat」——页面直接在中栏载入，不需要第二次点击；
 2. 在里面登录一次 DeepSeek，**之后重启也不用再登**。
 
 - 再点一次入口收起面板；切换去别的面板（插件、自动化任务、会话……）时访客只是被隐藏、从不被卸载，所以切回来不会重新加载、也不会掉登录。
@@ -31,7 +31,7 @@ dsh plugin --profile desktop add github:jaychang1989/dsh-webchat
 - 桌面端给浏览器访客的分区是**进程内**的（每次运行随机命名），所以登录态由本插件自己保存：页面的 localStorage 与页面自己的 cookie 由页面侧搬运，分区 cookie（**含 HttpOnly**）在宿主能拿到 Electron 时一并搬运。宿主拿不到 Electron 时，前两条仍然生效。
 - **想退出登录**：先完全退出 DSH，再删除登录快照。默认在 `%USERPROFILE%\.dsh\dsh-webchat\session.json`；设置了 `DSH_HOME` 环境变量时跟随它：`<DSH_HOME>\dsh-webchat\session.json`（旧快照只迁移一次，旧文件保留供备份，可手动删除；请保留不含登录信息的 `session.migrated` 标记，防止旧登录再次迁入）。
 
-在 Chat DeepSeek 面板中按 **F5 或 Ctrl+R**（macOS 为 **⌘R**）刷新官方页面，即可更新其他设备新增的会话；无需重启应用，也没有额外的刷新按钮。快捷键可在宿主的快捷键设置中调整。
+在 Chat 面板中按 **F5 或 Ctrl+R**（macOS 为 **⌘R**）刷新官方页面，即可更新其他设备新增的会话；无需重启应用，也没有额外的刷新按钮。快捷键可在宿主的快捷键设置中调整。
 
 ## 登录兼容性
 

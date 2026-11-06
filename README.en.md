@@ -4,7 +4,7 @@
 
 ## Introduction
 
-Opens the official [chat.deepseek.com](https://chat.deepseek.com) web app inside [DeepSeek Harness Desktop](https://github.com/deepseek-ai/deepseek-harness): click "Chat DeepSeek" in the sidebar and the real page renders in the **center column of the DSH window**, like any other full-page view. 
+Opens the official [chat.deepseek.com](https://chat.deepseek.com) web app inside [DeepSeek Harness Desktop](https://github.com/deepseek-ai/deepseek-harness): click "Chat" in the sidebar and the real page renders in the **center column of the DSH window**, like any other full-page view. 
 
 ## Install
 
@@ -22,7 +22,7 @@ dsh plugin --profile desktop add github:jaychang1989/dsh-webchat
 
 ## Use
 
-1. Click "Chat DeepSeek" in the sidebar — the page loads in the center column; there is no second click.
+1. Click "Chat" in the sidebar — the page loads in the center column; there is no second click.
 2. Sign in to DeepSeek once — **restarts will not ask again**.
 
 - Clicking again collapses the panel. Switching to another panel (Plugins, Automation Tasks, a session …) only hides the guest, never unmounts it, so coming back neither reloads the page nor drops the session.
@@ -30,7 +30,7 @@ dsh plugin --profile desktop add github:jaychang1989/dsh-webchat
 - The shell hands every browser guest a **process-lifetime** partition (a fresh random name per run), so this plugin carries the session itself: the page's localStorage and its own cookies travel through the page, and the partition's cookies (**HttpOnly included**) travel through the host half wherever Electron is reachable. Without Electron, the first two still work.
 - **To sign out**: fully quit DSH, then delete the snapshot file. It lives at `%USERPROFILE%\.dsh\dsh-webchat\session.json` by default, or `<DSH_HOME>\dsh-webchat\session.json` when `DSH_HOME` is set. Legacy credentials are migrated once and the old file is retained for backup; it can be removed manually. Keep the credential-free `session.migrated` marker to prevent the old login from being imported again.
 
-Press **F5 or Ctrl+R** (**⌘R** on macOS) while Chat DeepSeek is selected to refresh the official page and fetch conversations created on another device. No extra refresh button or app restart is needed. The bindings can be customized in the shell shortcut settings.
+Press **F5 or Ctrl+R** (**⌘R** on macOS) while Chat is selected to refresh the official page and fetch conversations created on another device. No extra refresh button or app restart is needed. The bindings can be customized in the shell shortcut settings.
 
 ## Login compatibility
 

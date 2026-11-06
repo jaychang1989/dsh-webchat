@@ -334,7 +334,7 @@ test('apply registers the sidebar row and the matching main panel', () => {
   assert.equal(row.definition.id, PANEL_ID)
   assert.equal(row.definition.order, -1)
   assert.equal(typeof row.definition.label, 'function')
-  assert.equal(row.definition.label(), 'Chat DeepSeek')
+  assert.equal(row.definition.label(), 'Chat')
   assert.equal(page.definition.name, 'main')
   assert.equal(page.definition.key, PANEL_ID, 'the main cell key must be the row id')
   assert.equal(typeof row.component, 'function')
@@ -347,11 +347,11 @@ test('the row label is the product name, not a translation', () => {
   const { plugin, ctx, registrations } = loadPlugin(document)
   plugin.apply(ctx)
 
-  // Deliberate: the row reads "Chat DeepSeek" in every language, because that is
-  // the product's own name. The rest of the plugin's copy stays localized.
-  assert.equal(registrations[0].definition.label(), 'Chat DeepSeek')
+  // Deliberate: the row reads "Chat" in every language, because that is the
+  // short display name. The rest of the plugin's copy stays localized.
+  assert.equal(registrations[0].definition.label(), 'Chat')
   document.documentElement.setAttribute('lang', 'en-US')
-  assert.equal(registrations[0].definition.label(), 'Chat DeepSeek')
+  assert.equal(registrations[0].definition.label(), 'Chat')
 })
 
 test('the row icon honours the size the sidebar asks for', () => {
@@ -650,7 +650,7 @@ test('without the desktop bridge the panel offers the window fallback', async ()
 
   assert.deepEqual(calls, [{ path: '/api/dsh-webchat/open', method: 'POST' }])
   assert.equal(button.disabled, false)
-  assert.equal(box.children[1].textContent, '已打开 Chat DeepSeek')
+  assert.equal(box.children[1].textContent, '已打开 Chat')
 })
 
 test('a refused guest is reported with the host reason', async () => {
