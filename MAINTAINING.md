@@ -86,6 +86,8 @@ Windows 使用 `rundll32 url.dll,FileProtocolHandler`，使 URL 的 `&` 保持�
 
 关于 Electron 可达性：`import('electron')` 在本加载器下会解析出一个**没有具名导出**的命名空间（真实 API 在 `default` 上），而 `createRequire(...)('electron')` 会被拦成 `Cannot find module`。所以 `electronApi()` 会**同时接受 `mod` 与 `mod.default`** 两种形状，并把两条探测的失败原因拼起来回报。
 
+**0.8.0 说明**：登录态由这条"站点存储 + cookie 快照回灌"通道维持，**与 harness 版本、app.asar 是否被改都无关**——只要不破坏"无条件保存、有快照就回灌"这套简单流程，升级后仍免登录。0.8.0 只把侧栏显示名由 "Chat DeepSeek" 改为 "Chat"，会话机制与 0.7.8 一致（曾尝试过"登出态不覆盖/持久分区跳过快照"等额外守卫，反而破坏了登录保持，已全部回退，不要重加）。
+
 时序（顺序是有原因的，别随意调整）：
 
 - **回灌 cookie 必须在首次导航之前**：拿到租约 → `POST /session/restore`（宿主把快照里的 cookie 写进本次的分区）→ 才 `loadURL`。这样页面的第一个请求就带着登录态。
@@ -137,7 +139,7 @@ test/*.test.mjs    node --test
 node --test
 ```
 
-58 个用例。宿主半区用假 context、假 request/response 与**可注入的 Electron/cookie 替身**驱动：快照落盘往返、cookie 捕获与回灌（含 HttpOnly、拒绝一个不合法 cookie 不影响其余、缺 name/domain 的条目跳过）、两条会话路由的方法守卫与分区校验、"没有快照"是成功而非失败、拿不到 Electron 时如实报错且不影响页面、`DSH_HOME` 解析（非空即根、空白视为未设置、`~` 展开）与旧 `~/.dsh` 快照的一次性搬运（不覆盖新位置已有的数据）。浏览器半区用一层薄的 React 测试替身（`createElement`/`useRef`/`useEffect`）+ DOM 桩**真实执行**：槽位注册契约（同一个 id、order、label thunk、按 `size` 出图标）、租约与 webview 属性、UA 只删 Electron token（干净 UA 原样通过、无 UA 不写入）、**卸载只隐藏不摘除、重挂复用同一访客、只申请一次租约**、会话恢复只写一次存储并只刷新一次（且恢复期间不快照）、使用中/卸载前的快照与定时器清理，以及无桥接时的降级与失败提示。重挂时重写样式表、俄语文案，以及原生弹窗通知订阅、协议限制、卸载清理，及正式刷新命令的桌面绑定和上下文。加入对抗反例：恢复期间定时保存、恢复失败与卸载、授权站点来源检查、迁移后删除快照不会复活，以及非本站 cookie 排除。
+55 个用例。宿主半区用假 context、假 request/response 与**可注入的 Electron/cookie 替身**驱动：快照落盘往返、cookie 捕获与回灌（含 HttpOnly、拒绝一个不合法 cookie 不影响其余、缺 name/domain 的条目跳过）、两条会话路由的方法守卫与分区校验、"没有快照"是成功而非失败、拿不到 Electron 时如实报错且不影响页面、`DSH_HOME` 解析（非空即根、空白视为未设置、`~` 展开）与旧 `~/.dsh` 快照的一次性搬运（不覆盖新位置已有的数据）。浏览器半区用一层薄的 React 测试替身（`createElement`/`useRef`/`useEffect`）+ DOM 桩**真实执行**：槽位注册契约（同一个 id、order、label thunk、按 `size` 出图标）、租约与 webview 属性、UA 只删 Electron token（干净 UA 原样通过、无 UA 不写入）、**卸载只隐藏不摘除、重挂复用同一访客、只申请一次租约**、会话恢复只写一次存储并只刷新一次（且恢复期间不快照）、使用中/卸载前的快照与定时器清理，以及无桥接时的降级与失败提示。重挂时重写样式表、俄语文案，以及原生弹窗通知订阅、协议限制、卸载清理，及正式刷新命令的桌面绑定和上下文。加入对抗反例：恢复期间定时保存、恢复失败与卸载、授权站点来源检查、迁移后删除快照不会复活，以及非本站 cookie 排除。
 
 ## 无法从 app 外部验证的部分
 

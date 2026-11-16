@@ -347,8 +347,8 @@ test('the row label is the product name, not a translation', () => {
   const { plugin, ctx, registrations } = loadPlugin(document)
   plugin.apply(ctx)
 
-  // Deliberate: the row reads "Chat" in every language, because that is the
-  // short display name. The rest of the plugin's copy stays localized.
+  // Deliberate: the row reads "Chat" in every language, because that is
+  // the product's own name. The rest of the plugin's copy stays localized.
   assert.equal(registrations[0].definition.label(), 'Chat')
   document.documentElement.setAttribute('lang', 'en-US')
   assert.equal(registrations[0].definition.label(), 'Chat')
