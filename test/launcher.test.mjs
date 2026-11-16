@@ -357,6 +357,40 @@ test('the session routes accept a persisted guest partition from a shell patch',
     cleanup()
   }
 })
+test('accepts the stable pinned persist partition and defers restore to the shell', async () => {
+  // The shell patch pins one fixed partition, "persist:dsh-webchat-sidebar-browser",
+  // so a login survives restarts. It must pass the shape check and be treated as
+  // persistent (restore is a no-op that never touches the live login).
+  const { file, cleanup } = tempSnapshot()
+  setSessionFile(file)
+  writeSnapshot(file, {
+    version: 1,
+    savedAt: '2026-09-29T00:00:00.000Z',
+    cookies: [{ name: 'ds_session_id', value: 'stale', domain: '.deepseek.com', path: '/', secure: true, httpOnly: true }],
+    storage: [['settingsJwt', '{"value":null,"__version":"0"}']],
+    cookie: 'ds_session=stale-placeholder'
+  })
+  const cookies = fakeCookies()
+  setElectronLoader(async () => fakeElectron(cookies))
+  try {
+    const { ctx, routes } = fakeContext()
+    apply(ctx)
+
+    const partition = 'persist:dsh-webchat-sidebar-browser'
+    const restore = await callRoute(routes, ROUTES.restore, 'POST', { partition })
+    assert.equal(restore.status, 200, 'the pinned persist partition must not be rejected')
+    assert.deepEqual(restore.payload, { ok: true, cookies: 0, storage: null, cookie: '', savedAt: '' })
+    assert.equal(cookies.written.length, 0, 'no stale cookie may be written over the live login')
+
+    const save = await callRoute(routes, ROUTES.save, 'POST', { partition })
+    assert.equal(save.status, 200, 'the pinned persist partition must be accepted on save')
+  } finally {
+    setElectronLoader(null)
+    setSessionFile(null)
+    cleanup()
+  }
+})
+
 test('a persistent partition never restores a stale snapshot over its live login', async () => {
   const { file, cleanup } = tempSnapshot()
   setSessionFile(file)
